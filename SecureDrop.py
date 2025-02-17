@@ -14,7 +14,7 @@ def save_users(users):
         json.dump(users, file)
 
 def register_user():
-    """Handles user registration."""
+    """user registration."""
     users = load_users()
     
     full_name = input("Enter full name: ")

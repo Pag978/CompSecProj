@@ -30,6 +30,7 @@ def register_user():
     if password != confirm_password:
         print("Error: Passwords do not match!")
         return
+    print("Passwords Match.")
     
     users[email] = {
         "full_name": full_name,
@@ -39,5 +40,28 @@ def register_user():
     save_users(users)
     print("User registered successfully!")
 
+def first_time_setup():
+  print("No users are registered with this client.")
+  response = input("Do you want to register a new user (y/n)?: ").lower()
+  while True:
+    if response.startswith("y"):
+        register_user()
+        print("Exiting SecureDrop")
+        exit
+    elif response.startswith("n"):
+        print("Exiting SecureDrop")
+        exit
+    else:
+        print("Response not recognized.")
+        response = input("Please enter 'yes'(y) or 'no'(n): ")
 
-register_user()
+def main():
+    users = load_users()
+    if len(users) == 0:
+        first_time_setup()
+    
+
+if __name__ == '__main__':
+  main()
+    
+

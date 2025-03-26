@@ -43,6 +43,8 @@ class SecureDrop(cmd.Cmd):
     def do_exit(self, arg):
         """Exits the SecureDrop shell"""
         print("Exiting SecureDrop")
+        self.users = {}
+        self.contacts = {}
         sys.exit()
         return True
 

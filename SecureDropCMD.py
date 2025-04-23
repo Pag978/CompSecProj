@@ -1,12 +1,16 @@
-import cmd, sys, os, json, hashlib
+import cmd, sys, os, json, hashlib, socket, threading, time
 from hmac import compare_digest
 
+PORT = 50000
+INTERVALS = 5 #seconds
 
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
     prompt = "SecureDrop> "
     users = {}  # Only 1 user supported, keeping plural in case that changes (Extra Credit?)
     contacts = {}
+    current_email = None
+    online_contacts = {}
 
     # ----- SecureDrop Commands -----
     # TODO: Add security for contact info (Confidentiality + Integrity)
@@ -17,16 +21,29 @@ class SecureDrop(cmd.Cmd):
         if email in self.contacts:
             print("Contact already exists. Updating information.")
         name = input("Enter contact's full name: ")
-        self.contacts[email] = {"full_name": name}
+
+        self.contacts[email] = {
+            "full_name": name,
+            "contacts": self.contacts.get(email, {}).get("contacts", [])
+        }
+        if self.current_email and self.current_email not in self.contacts[email]["contacts"]:
+            self.contacts[email].setdefault("conflict", []).append(self.current_email)
+
         self.save_contacts()
         print("Contact added successfully!")
         return False
 
     def do_list(self, arg):
         """List all online contacts"""
+        '''
         if len(self.contacts) == 0:
             print("No contacts found.")
             return False
+        '''
+        if not self.online_contacts:
+            print("No mutual contacts online.")
+            return False
+
         print("\nOnline Contacts:")
         for email, info in self.contacts.items():
             print(f"- {info['full_name']} ({email})")
@@ -68,6 +85,13 @@ class SecureDrop(cmd.Cmd):
     # Cons: Lose easy access to class data
     def first_time_setup(self):
         """Request to register a new user, exit shell if denied."""
+        if os.path.exists("users.json"):
+            self.load_users()
+            if len(self.users) > 0:
+                print("Another instance has registered a user. Proceeding to login.")
+                self.user_login()
+                self.load_contacts()
+                return
         # If key exists but users.json does not, users.json was likely deleted.
         # -Delete key so new one is generated during password creation.
         # -Should maybe do the same with contacts?
@@ -93,7 +117,7 @@ class SecureDrop(cmd.Cmd):
         if os.path.exists("users.json"):
             with open("users.json", "r") as file:
                 self.users = json.load(file)
-    
+
     def load_contacts(self):
         """Load existing contacts from contacts.json."""
         if os.path.exists("contacts.json"):
@@ -159,8 +183,38 @@ class SecureDrop(cmd.Cmd):
             password = input("Enter Password: ")
             password = sign(password)
             if email in self.users and compare_digest(password, self.users[email]["password"]):
+                self.current_email = email
+                self.online_contacts = {}
+
+                threading.Thread(target=send_broadcast, args = (email, 5000), daemon=True).start()
+                threading.Thread(target=get_broadcast, args=(email, self.contacts, self.online_contacts), daemon=True).start()
                 return
             print("Email and Password Combination Invalid.\n")
+
+# UDP Broadcast - send messages to others on network.
+# Create UDP, enable broadcast, and keep boradcasting in intervals
+def send_broadcast(self, email):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        message = f"Online: {email}".encode()
+        while True:
+            s.sendto(message, ('<broadcast>', PORT))
+            time.sleep(INTERVALS)
+
+# Listen for broadcast, updates online list with mutual contacts online.
+def get_broadcast(user_email, contacts, online_contacts):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('', PORT))
+        while True:
+            data, _ = s.recvfrom(1024)
+            msg = data.decode()
+            if msg.startswith("Online:"):
+                contact_email = msg.split(":")[1].strip()
+                if contact_email in contacts:
+                    contact_entry = contacts[contact_email]
+                    if "contacts" in contact_entry and user_email in contact_entry["contacts"]:
+                        online_contacts[contact_email] = contact_entry["full_name"]
 
 # Hash password for security.
 # Currently using blake2b with a locally stored key

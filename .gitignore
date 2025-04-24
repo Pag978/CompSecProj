@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
-users.json
-contacts.json
-key
+users.enc
+contacts.enc
+key.enc
+report.log
+salt.enc

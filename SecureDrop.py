@@ -7,12 +7,23 @@ from Crypto.Random import get_random_bytes
 
 # TODO: Add integrity checks for contact info (Compare hashes from before encryption and after decryption?)
 # - Main question: What would be a good solution for storing these hashes? (original data needs to be accessible)
+# - Might make sense to just include contact info in user data?
+
+# TODO: Accept that the application only supports a single user at a time and refactor code accordingly
+# - Simplify user json object and remove code that iterates through users
 
 PEPPER_SIZE = 16
 SALT_SIZE = 16
 KEY_SIZE = 32
 NONCE_SIZE = 16
 TAG_SIZE = 16
+USERS_FILE = "users.enc"
+CONTACTS_FILE = "contacts.enc"
+KEY_FILE = "key.enc"
+SALT_FILE = "salt.enc"
+PEPPER_FILE = "pepper.enc"
+PICKLE_FILE = "pickle.enc"
+LOG_FILE = "report.log"
 
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
@@ -28,7 +39,7 @@ class SecureDrop(cmd.Cmd):
             print("Contact already exists. Updating information.")
         name = input("Enter contact's full name: ")
         self.contacts[email] = {"full_name": name}
-        encrypt_and_store(self.contacts, "contacts")
+        encrypt_and_store(self.contacts, CONTACTS_FILE)
         print("Contact added successfully!")
         return False
 
@@ -61,12 +72,12 @@ class SecureDrop(cmd.Cmd):
     def preloop(self):
         """Check if user is registered. Initialize first time setup if not,
         continue with user login otherwise"""
-        self.users = load_and_decrypt("users")
+        self.users = load_and_decrypt(USERS_FILE)
         if len(self.users) == 0:
             self.first_time_setup()
         else:
             self.user_login()
-            self.contacts = load_and_decrypt("contacts")
+            self.contacts = load_and_decrypt(CONTACTS_FILE)
 
     def precmd(self, line):
         return line.lower()
@@ -77,8 +88,9 @@ class SecureDrop(cmd.Cmd):
         # If key/contact exists but users does not, users was likely deleted.
         # -Delete key so new one is generated during user registration.
         # -Delete contacts so data isn't given to next registered user (also the new key wouldnt work).
-        if os.path.exists("key.enc"): os.remove("key.enc")
-        if os.path.exists("contacts"): os.remove("contacts.enc")
+        if os.path.exists(KEY_FILE): os.remove(KEY_FILE)
+        if os.path.exists(CONTACTS_FILE): os.remove(CONTACTS_FILE)
+        if os.path.exists(SALT_FILE): os.remove(SALT_FILE)
 
         print("No users are registered with this client.")
         response = input("Do you want to register a new user (y/n)?: ").lower()
@@ -120,7 +132,7 @@ class SecureDrop(cmd.Cmd):
         self.users[email] = {
             "full_name": full_name
         }
-        encrypt_and_store(self.users, "users", password)
+        encrypt_and_store(self.users, USERS_FILE, password)
         print("User registered successfully!")
         print("SecureDrop will now exit, restart and login to enter the SecureDrop shell.")
 
@@ -132,7 +144,7 @@ class SecureDrop(cmd.Cmd):
             email = input("Enter Email Address: ")
             if email == "exit": break
             password = getpass("Enter Password: ")
-            if email in self.users and validate_user(password):
+            if validate_user(email, password):
                 return
             print("Email and Password Combination Invalid.\n")
             attempts += 1
@@ -141,7 +153,7 @@ class SecureDrop(cmd.Cmd):
         if attempts >= 5:
           print("Login failed: Maximum attempts reached")
           time = datetime.datetime.now()
-          with open("report.log", "a") as file:
+          with open(LOG_FILE, "a") as file:
               file.write(time.strftime("%c") + "\n")
         print("Exiting SecureDrop")
         sys.exit()
@@ -149,20 +161,19 @@ class SecureDrop(cmd.Cmd):
 # ----- Hashing -----
 def generate_salt():
     salt = get_random_bytes(SALT_SIZE)
-    with open("salt.enc", "ab") as file:
+    with open(SALT_FILE, "ab") as file:
         file.write(salt)
     return salt
 
 def get_rand_pepper():
     peppers = []
-    with open("pepper.enc", "rb") as file:
+    with open(PEPPER_FILE, "rb") as file:
         pepper = file.read(PEPPER_SIZE)
         while pepper:
           peppers.append(pepper)
           pepper = file.read(PEPPER_SIZE)
     return random.choice(peppers)
 
-# Need a good salt for hashing, but what to use?
 def hash_b2b(data, salt, pepper):
     """Returns blake2b hash of `data`"""
     data = data.encode() + pepper 
@@ -171,17 +182,18 @@ def hash_b2b(data, salt, pepper):
     return b2b.hexdigest()
 
 # Check every permutation of the password with salt + pepper
-def validate_user(password):
+# Successful decryption = correct password
+def validate_user(email, password):
     salts = []
     peppers = []
     password = password.encode()
 
-    with open("salts.enc", "rb") as file:
+    with open(SALT_FILE, "rb") as file:
         salt = file.read(SALT_SIZE)
         while salt:
             salts.append(salt)
             salt = file.read(SALT_SIZE)
-    with open("peppers.enc", "rb") as file:
+    with open(PEPPER_FILE, "rb") as file:
         pepper = file.read(PEPPER_SIZE)
         while pepper:
           peppers.append(pepper)
@@ -189,7 +201,10 @@ def validate_user(password):
     
     for salt in salts:
         for pepper in peppers:
-            load_and_decrypt("users", hash_b2b(password, salt, pepper))
+            users = load_and_decrypt(USERS_FILE, hash_b2b(password, salt, pepper))
+            if email in users:
+                return True
+    return False
 
 # ----- Encryption -----
 # Can't help but feel like storing the key in its own file is counterintuitive
@@ -197,11 +212,11 @@ def validate_user(password):
 # -Should probably use unique keys for individual files & hashing, instead of one for everything
 def get_key():
     """Returns key stored in file, or generates one if it doesn't exist"""
-    if os.path.exists("key"):
-        with open("key", "rb") as file:
+    if os.path.exists(KEY_FILE):
+        with open(KEY_FILE, "rb") as file:
             key = file.read()
     else:
-        with open("key", "wb") as file:
+        with open(KEY_FILE, "wb") as file:
             key = get_random_bytes(32)
             file.write(key)
     return key

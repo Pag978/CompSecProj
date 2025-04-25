@@ -12,6 +12,10 @@ SALT_SIZE = 16
 KEY_SIZE = 32
 NONCE_SIZE = 16
 TAG_SIZE = 16
+USERS_FILE = "users.enc"
+CONTACTS_FILE = "contacts.enc"
+KEY_FILE = "key.enc"
+SALT_FILE = "salt.enc"
 
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
@@ -27,7 +31,7 @@ class SecureDrop(cmd.Cmd):
             print("Contact already exists. Updating information.")
         name = input("Enter contact's full name: ")
         self.contacts[email] = {"full_name": name}
-        encrypt_and_store(self.contacts, "contacts.enc")
+        encrypt_and_store(self.contacts, CONTACTS_FILE)
         print("Contact added successfully!")
         return False
 
@@ -60,7 +64,7 @@ class SecureDrop(cmd.Cmd):
     def preloop(self):
         """Check if user is registered. Initialize first time setup if not,
         continue with user login otherwise"""
-        self.users = load_and_decrypt("users.enc")
+        self.users = load_and_decrypt(USERS_FILE)
         if len(self.users) == 0:
             self.first_time_setup()
         else:
@@ -75,9 +79,9 @@ class SecureDrop(cmd.Cmd):
         """Request to register a new user, exit shell if denied."""
         # If key/contact exists but users does not, users.enc was likely deleted.
         # -Delete data that is tied to previous user
-        if os.path.exists("key.enc"): os.remove("key.enc")
-        if os.path.exists("contacts.enc"): os.remove("contacts.enc")
-        if os.path.exists("salt.enc"): os.remove("salt.enc")
+        if os.path.exists(KEY_FILE): os.remove(KEY_FILE)
+        if os.path.exists(CONTACTS_FILE): os.remove(CONTACTS_FILE)
+        if os.path.exists(SALT_FILE): os.remove(SALT_FILE)
 
         print("No users are registered with this client.")
         response = input("Do you want to register a new user (y/n)?: ").lower()
@@ -120,7 +124,7 @@ class SecureDrop(cmd.Cmd):
             "full_name": full_name,
             "password": password
         }
-        encrypt_and_store(self.users, "users.enc")
+        encrypt_and_store(self.users, USERS_FILE)
         print("User registered successfully!")
         print("SecureDrop will now exit, restart and login to enter the SecureDrop shell.")
 
@@ -128,7 +132,7 @@ class SecureDrop(cmd.Cmd):
     def user_login(self):
         """Login user with email + password"""
         attempts = 0
-        with open("salt.enc", "rb") as file:
+        with open(SALT_FILE, "rb") as file:
             salt = file.read()
         while attempts < 5:
             email = input("Enter Email Address: ")
@@ -151,7 +155,7 @@ class SecureDrop(cmd.Cmd):
 # ----- Hashing -----
 def generate_salt():
     salt = get_random_bytes(SALT_SIZE)
-    with open("salt.enc", "wb") as file:
+    with open(SALT_FILE, "wb") as file:
         file.write(salt)
     return salt
 
@@ -168,11 +172,11 @@ def hash_b2b(data, salt):
 # -Should probably use unique keys for individual files & hashing, instead of one for everything
 def get_key():
     """Returns key stored in file, or generates one if it doesn't exist"""
-    if os.path.exists("key.enc"):
-        with open("key.enc", "rb") as file:
+    if os.path.exists(KEY_FILE):
+        with open(KEY_FILE, "rb") as file:
             key = file.read()
     else:
-        with open("key.enc", "wb") as file:
+        with open(KEY_FILE, "wb") as file:
             key = get_random_bytes(KEY_SIZE)
             file.write(key)
     return key

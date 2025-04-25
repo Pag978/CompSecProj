@@ -1,7 +1,4 @@
 __pycache__/
 *.pyc
-users.enc
-contacts.enc
-key.enc
+*.enc
 report.log
-salt.enc

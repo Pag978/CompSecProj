@@ -12,12 +12,18 @@ from Crypto.Random import get_random_bytes
 # TODO: Accept that the application only supports a single user at a time and refactor code accordingly
 # - Simplify user json object and remove code that iterates through users
 
-PEPPER_SIZE = 16
+# TODO: Improve security for user data/passsword
+# - Attempting "Salt, Pepper, and Pickle" from the example
+# - Add password requirements
+
 SALT_SIZE = 16
+PEPPER_SIZE = 16
+PICKLE_SIZE = 16
 KEY_SIZE = 32
 NONCE_SIZE = 16
 TAG_SIZE = 16
-USERS_FILE = "users.enc"
+USER_FILE = "user.enc"
+USER_HASH_FILE = "user.hash.enc"
 CONTACTS_FILE = "contacts.enc"
 KEY_FILE = "key.enc"
 SALT_FILE = "salt.enc"
@@ -28,7 +34,7 @@ LOG_FILE = "report.log"
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
     prompt = "SecureDrop> "
-    users = {}  # Only 1 user supported, keeping plural in case that changes (Extra Credit?)
+    user = {}  # Only 1 user supported, keeping plural in case that changes (Extra Credit?)
     contacts = {}
 
     # ----- SecureDrop Commands -----
@@ -39,7 +45,7 @@ class SecureDrop(cmd.Cmd):
             print("Contact already exists. Updating information.")
         name = input("Enter contact's full name: ")
         self.contacts[email] = {"full_name": name}
-        encrypt_and_store(self.contacts, CONTACTS_FILE)
+        encrypt_and_store(self.contacts, CONTACTS_FILE, get_key())
         print("Contact added successfully!")
         return False
 
@@ -62,7 +68,7 @@ class SecureDrop(cmd.Cmd):
     # -Keeping 'return True' because that is theoretically how this is supposed to exit.
     def do_exit(self, arg):
         """Exits the SecureDrop shell"""
-        self.users = {}
+        self.user = {}
         self.contacts = {}
         print("Exiting SecureDrop")
         sys.exit()
@@ -72,12 +78,11 @@ class SecureDrop(cmd.Cmd):
     def preloop(self):
         """Check if user is registered. Initialize first time setup if not,
         continue with user login otherwise"""
-        self.users = load_and_decrypt(USERS_FILE)
-        if len(self.users) == 0:
-            self.first_time_setup()
-        else:
+        if os.path.exists(USER_FILE):
             self.user_login()
-            self.contacts = load_and_decrypt(CONTACTS_FILE)
+            self.contacts = load_and_decrypt(CONTACTS_FILE, get_key())
+        else:
+            self.first_time_setup()
 
     def precmd(self, line):
         return line.lower()
@@ -90,6 +95,7 @@ class SecureDrop(cmd.Cmd):
         # -Delete contacts so data isn't given to next registered user (also the new key wouldnt work).
         if os.path.exists(KEY_FILE): os.remove(KEY_FILE)
         if os.path.exists(CONTACTS_FILE): os.remove(CONTACTS_FILE)
+        if os.path.exists(USER_HASH_FILE): os.remove(USER_HASH_FILE)
         if os.path.exists(SALT_FILE): os.remove(SALT_FILE)
 
         print("No users are registered with this client.")
@@ -107,16 +113,7 @@ class SecureDrop(cmd.Cmd):
     def register_user(self):
         """user registration."""
         full_name = input("Enter Full Name: ")
-
-        # Email acquisition loop
-        # NOTE: This is likely unnecessary as the app only supports one 
-        #       registered user at a time.
-        while True:
-            email = input("Enter Email Address: ")
-            if email in self.users:
-                print("Error: Email already registered!")
-            else:
-                break
+        email = input("Enter Email Address: ")
 
         # Password acquisition loop
         while True:
@@ -129,14 +126,20 @@ class SecureDrop(cmd.Cmd):
             else:
                 print("Error: Passwords do not match!")
 
-        self.users[email] = {
+        self.user[email] = {
             "full_name": full_name
         }
-        encrypt_and_store(self.users, USERS_FILE, password)
+        encrypt_and_store(self.user, USER_FILE, password)
+        
+        # Store email hash for login validation without leaking user data
+        email_hash = hash_b2b(email, key=get_rand_pickle())
+        with open(USER_HASH_FILE, "wb") as file:
+            file.write(encrypt_aes(email_hash, password))
+
         print("User registered successfully!")
         print("SecureDrop will now exit, restart and login to enter the SecureDrop shell.")
+        return
 
-    # Using email as the hashing salt, which is not recommended but works while I try to think of something else
     def user_login(self):
         """Login user with email + password"""
         attempts = 0
@@ -144,12 +147,13 @@ class SecureDrop(cmd.Cmd):
             email = input("Enter Email Address: ")
             if email == "exit": break
             password = getpass("Enter Password: ")
-            if validate_user(email, password):
+            self.user = validate_user(email, password)
+            if self.user:
                 return
             print("Email and Password Combination Invalid.\n")
             attempts += 1
         # Not using "do_exit" here as the return value could potentially be modified to bypass login
-        self.users = {}
+        self.user = {}
         if attempts >= 5:
           print("Login failed: Maximum attempts reached")
           time = datetime.datetime.now()
@@ -174,20 +178,30 @@ def get_rand_pepper():
           pepper = file.read(PEPPER_SIZE)
     return random.choice(peppers)
 
-def hash_b2b(data, salt, pepper):
+def get_rand_pickle():
+    pickle_jar = []
+    with open(PICKLE_FILE, "rb") as file:
+        pickle = file.read(PICKLE_SIZE)
+        while pickle:
+          pickle_jar.append(pickle)
+          pickle = file.read(PICKLE_SIZE)
+    return random.choice(pickle_jar)
+
+def hash_b2b(data, salt=b"", pepper=b"", key=b""):
     """Returns blake2b hash of `data`"""
-    data = data.encode() + pepper 
-    b2b = blake2b(key=get_key(), salt=salt)
+    data = data.encode() + pepper
+    b2b = blake2b(digest_size=32, key=key, salt=salt)
     b2b.update(data)
-    return b2b.hexdigest()
+    return b2b.digest()
 
 # Check every permutation of the password with salt + pepper
 # Successful decryption = correct password
+# ISSUE: Leaking user data in memory if the correct password is used without the corresponding email
+# SOLUTION: Make a hash of the email, encrypted with the same key, and use that
 def validate_user(email, password):
     salts = []
     peppers = []
-    password = password.encode()
-
+    pickle_jar = []
     with open(SALT_FILE, "rb") as file:
         salt = file.read(SALT_SIZE)
         while salt:
@@ -198,13 +212,25 @@ def validate_user(email, password):
         while pepper:
           peppers.append(pepper)
           pepper = file.read(PEPPER_SIZE)
+    with open(PICKLE_FILE, "rb") as file:
+        pickle = file.read(PICKLE_SIZE)
+        while pickle:
+          pickle_jar.append(pickle)
+          pickle = file.read(PICKLE_SIZE)
+    with open(USER_HASH_FILE, "rb") as file:
+        ciphertext = file.read()
     
     for salt in salts:
         for pepper in peppers:
-            users = load_and_decrypt(USERS_FILE, hash_b2b(password, salt, pepper))
-            if email in users:
-                return True
-    return False
+            try:
+              password = hash_b2b(password, salt, pepper)
+              email_hash = decrypt_aes(ciphertext, password)
+              for pickle in pickle_jar:
+                  if hash_b2b(email, key=pickle) == email_hash:
+                    return load_and_decrypt(USER_FILE, password)
+            except ValueError:
+              pass
+    return {}
 
 # ----- Encryption -----
 # Can't help but feel like storing the key in its own file is counterintuitive
@@ -217,15 +243,14 @@ def get_key():
             key = file.read()
     else:
         with open(KEY_FILE, "wb") as file:
-            key = get_random_bytes(32)
+            key = get_random_bytes(KEY_SIZE)
             file.write(key)
     return key
-
 # AES-encryption: first 16-bytes are the nonce and last 16 bytes are the tag
 def encrypt_aes(data, key):
     """Returns AES encrypted `data` as bytes"""
     cipher = AES.new(key, AES.MODE_GCM)
-    ciphertext, tag = cipher.encrypt_and_digest(data.encode())
+    ciphertext, tag = cipher.encrypt_and_digest(data)
     ciphertext = cipher.nonce + ciphertext + tag
     return ciphertext
 
@@ -247,7 +272,7 @@ def load_and_decrypt(source, key):
 
 def encrypt_and_store(obj, dest, key):
     """Serializes & Encrypts JSON-compatible `obj` then writes it to `dest`."""
-    encrypted = encrypt_aes(json.dumps(obj), key)
+    encrypted = encrypt_aes(json.dumps(obj).encode(), key)
     with open(dest, "wb") as file:
         file.write(encrypted)
 

@@ -1,5 +1,5 @@
 __pycache__/
 *.pyc
 *.enc
-report.log
+*.log
 

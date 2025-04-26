@@ -13,8 +13,10 @@ from Crypto.Random import get_random_bytes
 # - Simplify user json object and remove code that iterates through users
 
 # TODO: Improve security for user data/passsword
-# - Attempting "Salt, Pepper, and Pickle" from the example
+# - Figure out what the "pickle" is used for ()
 # - Add password requirements
+# - 
+
 
 SALT_SIZE = 16
 PEPPER_SIZE = 16
@@ -45,7 +47,7 @@ class SecureDrop(cmd.Cmd):
             print("Contact already exists. Updating information.")
         name = input("Enter contact's full name: ")
         self.contacts[email] = {"full_name": name}
-        encrypt_and_store(self.contacts, CONTACTS_FILE, get_key())
+        encrypt_and_store(self.contacts, CONTACTS_FILE, self.user["password"])
         print("Contact added successfully!")
         return False
 
@@ -80,7 +82,7 @@ class SecureDrop(cmd.Cmd):
         continue with user login otherwise"""
         if os.path.exists(USER_FILE):
             self.user_login()
-            self.contacts = load_and_decrypt(CONTACTS_FILE, get_key())
+            self.contacts = load_and_decrypt(CONTACTS_FILE, self.user["password"])
         else:
             self.first_time_setup()
 
@@ -126,12 +128,20 @@ class SecureDrop(cmd.Cmd):
             else:
                 print("Error: Passwords do not match!")
 
-        self.user[email] = {
+        # Password is not stored, instead it is used as the encryption key for user data
+        # Login validation is performed by checking for successful decryption
+        # ISSUE: How to encrypt new data (contacts) without stored key
+        # Solution: Password hash can be kept in memory after login? Requires knowing password anyway
+        self.user = {
+            "email": email,
             "full_name": full_name
         }
         encrypt_and_store(self.user, USER_FILE, password)
         
         # Store email hash for login validation without leaking user data
+        # Don't think this is what the pickle is meant for, but idk what else to do with it
+        # The example powerpoint was not very clear on how pickles are applied
+        # Question: why not just use password for the hash key?
         email_hash = hash_b2b(email, key=get_rand_pickle())
         with open(USER_HASH_FILE, "wb") as file:
             file.write(encrypt_aes(email_hash, password))
@@ -163,12 +173,14 @@ class SecureDrop(cmd.Cmd):
         sys.exit()
 
 # ----- Hashing -----
+# Should have salt generation create multiple salts and choose one at random, so correct salt is not stored by itself
 def generate_salt():
     salt = get_random_bytes(SALT_SIZE)
     with open(SALT_FILE, "ab") as file:
         file.write(salt)
     return salt
 
+# I probably want to switch this to "generate_pepper"
 def get_rand_pepper():
     peppers = []
     with open(PEPPER_FILE, "rb") as file:
@@ -190,14 +202,14 @@ def get_rand_pickle():
 def hash_b2b(data, salt=b"", pepper=b"", key=b""):
     """Returns blake2b hash of `data`"""
     data = data.encode() + pepper
-    b2b = blake2b(digest_size=32, key=key, salt=salt)
+    b2b = blake2b(digest_size=KEY_SIZE, key=key, salt=salt)
     b2b.update(data)
     return b2b.digest()
 
 # Check every permutation of the password with salt + pepper
 # Successful decryption = correct password
 # ISSUE: Leaking user data in memory if the correct password is used without the corresponding email
-# SOLUTION: Make a hash of the email, encrypted with the same key, and use that
+# SOLUTION: Make hash of the email, encrypted with the same key, and use that
 def validate_user(email, password):
     salts = []
     peppers = []
@@ -219,15 +231,19 @@ def validate_user(email, password):
           pickle = file.read(PICKLE_SIZE)
     with open(USER_HASH_FILE, "rb") as file:
         ciphertext = file.read()
-    
+
     for salt in salts:
         for pepper in peppers:
             try:
-              password = hash_b2b(password, salt, pepper)
-              email_hash = decrypt_aes(ciphertext, password)
+              key = hash_b2b(password, salt, pepper)
+              email_hash = decrypt_aes(ciphertext, key)
               for pickle in pickle_jar:
+                  # Hash function running may still tell attackers that password was right w/o knowing email?
                   if hash_b2b(email, key=pickle) == email_hash:
-                    return load_and_decrypt(USER_FILE, password)
+                    user = load_and_decrypt(USER_FILE, key)
+                    # Password hash can be kept in memory after login? Theoretically requires knowing password anyway
+                    user["password"] = key
+                    return user
             except ValueError:
               pass
     return {}

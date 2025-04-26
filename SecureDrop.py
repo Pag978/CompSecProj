@@ -8,15 +8,13 @@ from Crypto.Random import get_random_bytes
 # TODO: Add integrity checks for contact info (Compare hashes from before encryption and after decryption?)
 # - Main question: What would be a good solution for storing these hashes? (original data needs to be accessible)
 # - Might make sense to just include contact info in user data?
-
-# TODO: Accept that the application only supports a single user at a time and refactor code accordingly
-# - Simplify user json object and remove code that iterates through users
-
 # TODO: Improve security for user data/passsword
-# - Figure out what the "pickle" is used for ()
+# - Figure out what the "pickle" is used for (see example ppt)
 # - Add password requirements
-# - 
-
+# - Sanitize user input
+# TODO: Add Certificate Authority stuff
+# TODO: Improve overall file integrity
+# - Example ppt mentions using timestamps?
 
 SALT_SIZE = 16
 PEPPER_SIZE = 16
@@ -36,7 +34,7 @@ LOG_FILE = "report.log"
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
     prompt = "SecureDrop> "
-    user = {}  # Only 1 user supported, keeping plural in case that changes (Extra Credit?)
+    user = {}  # Only 1 user supported
     contacts = {}
 
     # ----- SecureDrop Commands -----

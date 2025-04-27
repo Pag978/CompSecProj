@@ -1,4 +1,5 @@
 __pycache__/
+user_data/
 *.pyc
 *.enc
-report.log
+*.log

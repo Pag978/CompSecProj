@@ -1,8 +1,11 @@
 import cmd
+import json
 import sys
 import os
 import datetime
 import stat
+import base64
+import socket
 
 from getpass import getpass
 
@@ -32,6 +35,9 @@ SALT_SIZE = 16          # 16-byte salt used for hashing
 PEPPER_SIZE = 16        # 16-byte pepper used for hashing
 # PICKLE_SIZE = 16      # 16-byte pickle used for hashing
 MAX_ATTEMPTS = 5        # Max login attempts before program exits
+
+SERVER_HOST = 'localhost'
+SERVER_PORT = 8080
 
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
@@ -78,7 +84,38 @@ class SecureDrop(cmd.Cmd):
 
     def do_send(self, arg):
         """Initiate file transfer with a contact"""
-        return False
+        recipient_email = input("Enter recipient's email address: ")
+        file_path = input("Enter the file path to send: ")
+        try:
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            file_name = file_path.split("/")[-1]
+            encoded_file = base64.b64encode(file_data).decode('utf-8')
+
+            # Send the file transfer request to the server
+            self.send_request_to_server("send_file", {
+                "recipient": recipient_email,
+                "file_name": file_name,
+                "file_data": encoded_file
+            })
+            print(f"File '{file_name}' sent successfully!")
+
+        except Exception as e:(
+            print(f"Error sending file: {e}"))
+
+    def send_request_to_server(self, action, data):
+        """Connects to the server and sends a request with the given action and data"""
+        # Create a TCP socket
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect((SERVER_HOST, SERVER_PORT))
+        request = {
+            'action': action,
+            'data': data
+        }
+        # Send the JSON-encoded request to the serve and close after sending
+        client_socket.send(json.dumps(request).encode())
+        client_socket.close()
 
     # For some reason the cmdloop stopped exiting when this was called,
     # so I decided to take matters into my own hands and hit it the sys.exit().

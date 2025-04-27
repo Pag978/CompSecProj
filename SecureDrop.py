@@ -12,7 +12,6 @@ import SDSecurity
 # - Main question: What would be a good solution for storing these hashes? (original data needs to be accessible)
 # - Might make sense to just include contact info in user data?
 # TODO: Improve security for user data/passsword
-# - 
 # - Add password requirements
 # - Sanitize user input
 # TODO: Add Certificate Authority stuff

@@ -4,6 +4,7 @@ import threading
 import time
 import json
 import logging
+import base64
 
 import SDSecurity
 
@@ -14,7 +15,10 @@ BROADCAST_INTERVAL = 3      # seconds between successive broadcast messages
 OFFLINE_TIMEOUT = 6         # seconds after which a node is considered offline
 BROADCAST_ADDRESS = '<broadcast>'  # UDP broadcast address
 
-DATA_DIR = "user_data"
+SERVER_HOST = 'localhost'
+SERVER_PORT = 8080
+SAVE_DIRECTORY = '/home/receiver/received_files' # where the file will be saved.
+
 logging.basicConfig(
     filename="Network.log",
     level=logging.DEBUG,
@@ -130,5 +134,65 @@ class DiscoveryService(threading.Thread):
     
     def stop(self):
         """Stop the broadcast listener thread."""
+        self.running = False
+
+class FileTransferService(threading.Thread):
+    def __init__(self):
+        self.running = True
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Allows testing w/ multiple terminals on the same machine
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1) # Allows testing w/ multiple terminals on the same machine
+        try:
+            self.sock.bind((SERVER_HOST, SERVER_PORT))
+        except Exception as e:
+            logging.error(f"FileTransferService bind error: {e}")
+        self.sock.listen(5)
+        logging.info(f"Server listening on {SERVER_HOST}:{SERVER_PORT}")
+
+    def run(self):
+        while self.running:
+            client_socket, client_address = self.sock.accept()
+            print(f"Connection established with {client_address}")
+            self.handle_file_transfer_request(client_socket, client_address)
+        self.sock.close()
+
+    def handle_file_transfer_request(self, client_socket, client_address):
+        # Read full data from socket in chunks
+        chunks = []
+        while True:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+
+        # put all chunks into one string and decode as JSON
+        request = b''.join(chunks).decode()
+        request_data = json.loads(request)
+
+        # check if the request is to send a file
+        if request_data['action'] == 'send_file':
+            recipient_email = request_data['data']['recipient']
+            file_name = request_data['data']['file_name']
+            file_data = base64.b64decode(request_data['data']['file_data'])
+            print(f"Contact '{recipient_email}' is sending a file: {file_name}. Accept (y/n)?")
+            response = input()
+
+            if response.lower() == 'y':
+                print(f"Saving file '{file_name}'...")
+
+                # Makes sure if directory exists
+                if not os.path.exists(SAVE_DIRECTORY):
+                    os.makedirs(SAVE_DIRECTORY)
+                file_path = os.path.join(SAVE_DIRECTORY, file_name)
+                with open(file_path, 'wb') as file:
+                    file.write(file_data)
+
+                print(f"File '{file_name}' has been successfully transferred.")
+            else:
+                print("File transfer has been denied.")
+        client_socket.close()
+    
+    def stop(self):
+        """Stop the file server thread."""
         self.running = False
     

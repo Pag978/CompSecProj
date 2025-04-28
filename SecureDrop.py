@@ -61,6 +61,7 @@ class SecureDrop(cmd.Cmd):
         self.rsa_keys = None
         self.cert = None
         self.discovery = None   # Discovery service instance
+        self.file_server = None
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR, stat.S_IRWXU)
 
@@ -247,6 +248,7 @@ class SecureDrop(cmd.Cmd):
                     self.rsa_keys = SDSecurity.load_and_decrypt(KEY_FILE, self.user.get("aes_key"))
                     self.cert = SDSecurity.load_and_decrypt(CERT_FILE, self.user.get("aes_key"))
                     self.start_discovery()
+                    self.start_file_server()
                     return
                 else:
                     logging.error(f"Failed login attempt: no error (wrong email?)")
@@ -283,6 +285,15 @@ class SecureDrop(cmd.Cmd):
             logging.info("Discovery service started.")
         except Exception as e:
             logging.error(f"Failed to start discovery service: {e}")
+    
+    def start_file_server(self):
+        try:
+            self.file_server = SDNetwork.FileTransferService()
+            self.file_server.start()
+        except Exception as e:
+            logging.error(f"Failed to start file transfer service: {e}")
+
+        
 
     def send_request_to_server(self, action, data):
         """Connects to the server and sends a request with the given action and data"""
@@ -301,6 +312,8 @@ class SecureDrop(cmd.Cmd):
         self.user = {}
         if self.discovery:
             self.discovery.stop()
+        if self.file_server:
+            self.file_server.stop()
         print("Exiting SecureDrop")
         logging.info("Exiting SecureDrop.")
         sys.exit(code)

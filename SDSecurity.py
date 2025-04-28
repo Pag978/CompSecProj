@@ -4,20 +4,25 @@ import random
 import stat
 import hashlib
 import hmac
+import base64
 
-from Crypto.Cipher import AES
+from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.Random import get_random_bytes
+from Crypto.PublicKey import RSA
+from Crypto.Signature import pss
+from Crypto.Hash import SHA256
 
 ITERATIONS = 100000     # PBKDF2 hash work factor (tweak according to performance/security needs)
 SALT_SIZE = 16          # 16-byte salt used for hashing
 PEPPER_SIZE = 16        # 16-byte pepper used for hashing
 # PICKLE_SIZE = 16      # 16-byte pickle used for hashing
-KEY_SIZE = 32           # 32-byte (256-bit) AES key 
+AES_KEY_SIZE = 32       # 32-byte (256-bit) AES key
+RSA_KEY_SIZE = 2048     # 2048-bit RSA key 
 TAG_SIZE = 16           # AES-GCM generates 16-byte tag
 NONCE_SIZE = 16         # AES-GCM generates 16-byte nonce
 
 # ----- Hashing -----
-def derive_key_pbkdf2(password, salt, pepper=b"", iterations=ITERATIONS, key_size=KEY_SIZE, algo='sha256'):
+def derive_key_pbkdf2(password, salt, pepper=b"", iterations=ITERATIONS, key_size=AES_KEY_SIZE, algo='sha256'):
     """Derive a key from `password` using PBKDF2."""
     password = password.encode() + pepper
     return hashlib.pbkdf2_hmac(algo, password, salt, iterations, key_size)
@@ -25,7 +30,7 @@ def derive_key_pbkdf2(password, salt, pepper=b"", iterations=ITERATIONS, key_siz
 def hash_b2b(data, salt=b"", pepper=b"", key=b""):
     """Returns blake2b hash of `data`"""
     data = data.encode() + pepper
-    b2b = hashlib.blake2b(digest_size=KEY_SIZE, key=key, salt=salt)
+    b2b = hashlib.blake2b(key=key, salt=salt)
     b2b.update(data)
     return b2b.digest()
 
@@ -70,6 +75,67 @@ def decrypt_aes(data, key):
     ciphertext = data[NONCE_SIZE:-TAG_SIZE]
     cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
     return cipher.decrypt_and_verify(ciphertext, tag)
+
+def generate_rsa_key_pair():
+    """Returns generated RSA key pair as `(private, public)`"""
+    key = RSA.generate(RSA_KEY_SIZE)
+    private_key = key.export_key()
+    public_key = key.public_key().export_key()
+    return private_key, public_key
+
+def encrypt_rsa(data, public_key):
+    """Returns RSA encrypted `data` as bytes using receiver's public key"""
+    rsa_key = RSA.import_key(public_key)
+    cipher = PKCS1_OAEP.new(rsa_key)
+    return cipher.encrypt(data)
+
+def decrypt_rsa(data, private_key):
+    """Returns RSA decrypted `data` as bytes using receiver's private key"""
+    rsa_key = RSA.import_key(private_key)
+    cipher = PKCS1_OAEP.new(rsa_key)
+    return cipher.decrypt(data)
+
+def sign_message(data, private_key):
+    """Sign message using RSA private key"""
+    rsa_key = RSA.import_key(private_key)
+    hash_obj = SHA256.new(data.encode())
+    signature = pss.new(rsa_key).sign(hash_obj)
+    return base64.b64encode(signature).decode()
+
+def verify_signature(data, signature, public_key):
+    """Verify signature using RSA public key"""
+    rsa_key = RSA.import_key(public_key)
+    hash_obj = SHA256.new(data.encode())
+    sig = base64.b64decode(signature)
+    verifier = pss.new(rsa_key)
+    try:
+        verifier.verify(hash_obj, sig)
+        return True
+    except:
+        return False
+
+# Create a simple self-signed certificate with a signature over (email|name|public_key)
+def create_certificate(email, full_name, public_key, private_key):
+    cert_data = {
+        "email": email,
+        "name": full_name,
+        "public_key": public_key.decode()
+    }
+    cert_string = f"{email}|{full_name}|{public_key.decode()}"
+    signature = sign_message(cert_string, private_key)
+    cert_data["signature"] = signature
+    return cert_data
+
+def verify_certificate(cert):
+    try:
+        email = cert["email"]
+        name = cert["name"]
+        pub_key = cert["public_key"]
+        sig = cert["signature"]
+        cert_string = f"{email}|{name}|{pub_key}"
+        return verify_signature(cert_string, sig, pub_key)
+    except:
+        return False
 
 # ----- File I/O -----
 def secure_write(data, filepath):

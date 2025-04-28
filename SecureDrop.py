@@ -6,6 +6,8 @@ import datetime
 import stat
 import base64
 import socket
+import logging
+import traceback
 
 from getpass import getpass
 
@@ -26,7 +28,10 @@ import SDNetwork
 DATA_DIR = "user_data"
 USER_FILE = os.path.join(DATA_DIR, "user.enc")
 USER_HASH_FILE = os.path.join(DATA_DIR, "user.hash.enc")
+CERT_FILE = os.path.join(DATA_DIR, "certificate.enc")
+KEY_FILE = os.path.join(DATA_DIR, "rsa_keys.enc")
 CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.enc")
+CONTACT_KEYS_FILE = os.path.join(DATA_DIR, "contact_keys.enc")
 SALT_FILE = os.path.join(DATA_DIR, "salt.enc")
 PEPPER_FILE = os.path.join(DATA_DIR, "pepper.enc")
 PICKLE_FILE = os.path.join(DATA_DIR, "pickle.enc")
@@ -40,6 +45,12 @@ MAX_ATTEMPTS = 5        # Max login attempts before program exits
 SERVER_HOST = 'localhost'
 SERVER_PORT = 8080
 
+logging.basicConfig(
+    filename="App.log",
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s: %(message)s"
+)
+
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
     prompt = "SecureDrop> "
@@ -47,7 +58,8 @@ class SecureDrop(cmd.Cmd):
     def __init__(self):
         super().__init__()
         self.user = None  # Only 1 user supported
-        self.contacts = {}
+        self.rsa_keys = None
+        self.cert = None
         self.discovery = None   # Discovery service instance
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR, stat.S_IRWXU)
@@ -56,19 +68,19 @@ class SecureDrop(cmd.Cmd):
     def do_add(self, arg):
         """Add or update a contact"""
         # Minimizing time secure data is in memory by loading contacts only when used
-        self.contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["key"])
-        email = input("Enter contact's email address: ")
-        if email in self.contacts:
+        contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
+        email = input("Enter contact's email address: ").strip()
+        if email in contacts:
             print("Contact already exists. Updating information.")
-        name = input("Enter contact's full name: ")
+        name = input("Enter contact's full name: ").strip()
         
         # update/save contacts, then empty variable
-        self.contacts[email] = {
+        contacts[email] = {
             "full_name": name,
+            "reciprocated": False,
             "last_updated": datetime.datetime.now().isoformat()
         }
-        SDSecurity.encrypt_and_store(self.contacts, CONTACTS_FILE, self.user["key"])
-        self.contacts = {}
+        SDSecurity.encrypt_and_store(contacts, CONTACTS_FILE, self.user["aes_key"])
         print("Contact added successfully!")
         return False
 
@@ -79,8 +91,8 @@ class SecureDrop(cmd.Cmd):
           2. The contact is detected as online on the same network.
           3. (Future) The contact has reciprocated.
         """
-        self.contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["key"])
-        if len(self.contacts) == 0:
+        contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
+        if len(contacts) == 0:
             print("No contacts found.")
             return False
         online = {}
@@ -88,18 +100,17 @@ class SecureDrop(cmd.Cmd):
             online = self.discovery.get_online_contacts()
 
         matched = []
-        for email, info in online.items():
-            if email in self.contacts:
+        for email, info in contacts.items():
+            if info.get("reciprocated", False) and email in online:
                 # For now, we assume reciprocation. Future work will add a mutual authentication
                 # handshake to be certain of reciprocal trust.
-                matched.append((email, info["name"]))
+                matched.append((email, info.get("full_name")))
         if matched:
             print("\nOnline Contacts:")
             for email, name in matched:
                 print(f"- {name} ({email})")
         else:
             print("No contacts online.")
-        self.contacts = {}
         return False
 
     def do_send(self, arg):
@@ -121,21 +132,8 @@ class SecureDrop(cmd.Cmd):
             })
             print(f"File '{file_name}' sent successfully!")
 
-        except Exception as e:(
-            print(f"Error sending file: {e}"))
-
-    def send_request_to_server(self, action, data):
-        """Connects to the server and sends a request with the given action and data"""
-        # Create a TCP socket
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.connect((SERVER_HOST, SERVER_PORT))
-        request = {
-            'action': action,
-            'data': data
-        }
-        # Send the JSON-encoded request to the serve and close after sending
-        client_socket.send(json.dumps(request).encode())
-        client_socket.close()
+        except Exception as e:
+            print(f"Error sending file: {e}")
 
     # For some reason the cmdloop stopped exiting when this was called,
     # so I decided to take matters into my own hands and hit it the sys.exit().
@@ -180,47 +178,60 @@ class SecureDrop(cmd.Cmd):
 
     # Should improve input validation here
     def register_user(self):
-        """user registration."""
-        full_name = input("Enter Full Name: ").strip()
-        email = input("Enter Email Address: ").strip()
+        try:
+            """user registration."""
+            full_name = getpass("Enter Full Name: ").strip()
+            email = getpass("Enter Email Address: ").strip()
 
-        # Password acquisition loop
-        while True:
-            password = input("Enter Password: ")
-            confirm_password = input("Re-enter Password: ")
-            if len(password) == 0:
-                print("Error: Invalid password!")
-            elif password != confirm_password:
-                print("Error: Passwords do not match!")
-            else:
-                print("Passwords Match!")
-                salt = SDSecurity.create_and_store_bytes(SALT_SIZE, SALT_FILE)
-                pepper = SDSecurity.create_and_store_bytes(PEPPER_SIZE, PEPPER_FILE)
-                key = SDSecurity.derive_key_pbkdf2(password, salt, pepper)
-                break
+            # Password acquisition loop
+            while True:
+                password = input("Enter Password: ")
+                confirm_password = input("Re-enter Password: ")
+                if len(password) == 0:
+                    print("Error: Invalid password!")
+                elif password != confirm_password:
+                    print("Error: Passwords do not match!")
+                else:
+                    print("Passwords Match!")
+                    salt = SDSecurity.create_and_store_bytes(SALT_SIZE, SALT_FILE)
+                    pepper = SDSecurity.create_and_store_bytes(PEPPER_SIZE, PEPPER_FILE)
+                    key = SDSecurity.derive_key_pbkdf2(password, salt, pepper)
+                    break
+            
+            # Password is not stored, instead it is used as the encryption key for user data
+            # Login validation is performed by checking for successful decryption
+            # ISSUE: How to encrypt new data (contacts) without stored key
+            # Solution: Password hash can be kept in memory after login? Requires knowing password anyway
+            user_data = {
+                "email": email,
+                "full_name": full_name,
+                "created": datetime.datetime.now().isoformat()
+            }
+            SDSecurity.encrypt_and_store(user_data, USER_FILE, key)
+            
+            # Store email hash for login validation without leaking user data
+            # Don't think this is what the pickle is meant for, but idk what else to do with it
+            # The example powerpoint was not very clear on how pickles are applied
+            # Question: why not just use password for the hash key?
+            email_hash = SDSecurity.hash_b2b(email.lower())
+            email_encrypted = SDSecurity.encrypt_aes(email_hash, key)
+            SDSecurity.secure_write(email_encrypted, USER_HASH_FILE)
 
-        # Password is not stored, instead it is used as the encryption key for user data
-        # Login validation is performed by checking for successful decryption
-        # ISSUE: How to encrypt new data (contacts) without stored key
-        # Solution: Password hash can be kept in memory after login? Requires knowing password anyway
-        user_data = {
-            "email": email,
-            "full_name": full_name,
-            "created": datetime.datetime.now().isoformat()
-        }
-        SDSecurity.encrypt_and_store(user_data, USER_FILE, key)
-        
-        # Store email hash for login validation without leaking user data
-        # Don't think this is what the pickle is meant for, but idk what else to do with it
-        # The example powerpoint was not very clear on how pickles are applied
-        # Question: why not just use password for the hash key?
-        email_hash = SDSecurity.hash_b2b(email.lower())
-        email_encrypted = SDSecurity.encrypt_aes(email_hash, key)
-        SDSecurity.secure_write(email_encrypted, USER_HASH_FILE)
+            private_key, public_key = SDSecurity.generate_rsa_key_pair()
+            SDSecurity.encrypt_and_store({"private_key": private_key.decode(), "public_key": public_key.decode()}, KEY_FILE, key)
+            cert = SDSecurity.create_certificate(email, full_name, public_key, private_key)
+            SDSecurity.encrypt_and_store(cert, CERT_FILE, key)
 
-        print("User registered successfully!")
-        print("SecureDrop will now exit, restart and login to enter the SecureDrop shell.")
-        return
+            print("User registered successfully!")
+            print("SecureDrop will now exit, restart and login to enter the SecureDrop shell.")
+            logging.info("User registered successfully!")
+            return
+        except Exception as e:
+            print("Registration failed.")
+            print(f"Exception: {type(e).__name__} - {e}")
+            print("Traceback:")
+            traceback.print_exc(file=sys.stdout)
+            logging.error(f"Registration error: {e}")
 
     def user_login(self):
         """Login user with email + password"""
@@ -229,16 +240,19 @@ class SecureDrop(cmd.Cmd):
             email = input("Enter Email Address: ").strip()
             if email.lower() == "exit":
                 self.clean_and_exit()
-            password = input("Enter Password: ")
+            password = getpass("Enter Password: ")
             try:
                 if self.validate_user(email, password):
-                    # Begin broadcasting online status after successful login
-                    self.discovery = SDNetwork.DiscoveryService(self.user["email"], self.user["full_name"])
-                    self.discovery.start()
+                    # Load user data & begin broadcasting online status after successful login
+                    self.rsa_keys = SDSecurity.load_and_decrypt(KEY_FILE, self.user.get("aes_key"))
+                    self.cert = SDSecurity.load_and_decrypt(CERT_FILE, self.user.get("aes_key"))
+                    self.start_discovery()
                     return
                 else:
+                    logging.error(f"Failed login attempt: no error (wrong email?)")
                     print("Email and Password Combination Invalid.\n")
             except Exception as e:
+                logging.error(f"Failed login attempt: {e}")
                 print("Email and Password Combination Invalid.\n")
             attempts += 1
         print("Login failed: Maximum attempts reached")
@@ -257,17 +271,38 @@ class SecureDrop(cmd.Cmd):
         email_hash = SDSecurity.decrypt_aes(ciphertext, key)
         if  email_hash == SDSecurity.hash_b2b(email.lower()):
             self.user = SDSecurity.load_and_decrypt(USER_FILE, key)
-            self.user["key"] = key
+            self.user["aes_key"] = key
             return True
         else:
             return False
     
+    def start_discovery(self):
+        try:
+            self.discovery = SDNetwork.DiscoveryService(self.cert, CONTACTS_FILE, self.user.get("aes_key"))
+            self.discovery.start()
+            logging.info("Discovery service started.")
+        except Exception as e:
+            logging.error(f"Failed to start discovery service: {e}")
+
+    def send_request_to_server(self, action, data):
+        """Connects to the server and sends a request with the given action and data"""
+        # Create a TCP socket
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect((SERVER_HOST, SERVER_PORT))
+        request = {
+            'action': action,
+            'data': data
+        }
+        # Send the JSON-encoded request to the serve and close after sending
+        client_socket.send(json.dumps(request).encode())
+        client_socket.close()
+    
     def clean_and_exit(self, code=0):
         self.user = {}
-        self.contacts = {}
         if self.discovery:
             self.discovery.stop()
         print("Exiting SecureDrop")
+        logging.info("Exiting SecureDrop.")
         sys.exit(code)
 
 # ----- Depricated -----

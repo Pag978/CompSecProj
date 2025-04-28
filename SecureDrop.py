@@ -10,6 +10,7 @@ import socket
 from getpass import getpass
 
 import SDSecurity
+import SDNetwork
 
 # TODO: Add integrity checks for contact info (Compare hashes from before encryption and after decryption?)
 # - Main question: What would be a good solution for storing these hashes? (original data needs to be accessible)
@@ -47,6 +48,7 @@ class SecureDrop(cmd.Cmd):
         super().__init__()
         self.user = None  # Only 1 user supported
         self.contacts = {}
+        self.discovery = None   # Discovery service instance
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR, stat.S_IRWXU)
 
@@ -71,14 +73,32 @@ class SecureDrop(cmd.Cmd):
         return False
 
     def do_list(self, arg):
-        """List all online contacts"""
+        """
+        List online contacts that meet the following criteria:
+          1. You have added the contact (stored locally).
+          2. The contact is detected as online on the same network.
+          3. (Future) The contact has reciprocated.
+        """
         self.contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["key"])
         if len(self.contacts) == 0:
             print("No contacts found.")
             return False
-        print("\nOnline Contacts:")
-        for email, info in self.contacts.items():
-            print(f"- {info['full_name']} ({email})")
+        online = {}
+        if self.discovery:
+            online = self.discovery.get_online_contacts()
+
+        matched = []
+        for email, info in online.items():
+            if email in self.contacts:
+                # For now, we assume reciprocation. Future work will add a mutual authentication
+                # handshake to be certain of reciprocal trust.
+                matched.append((email, info["name"]))
+        if matched:
+            print("\nOnline Contacts:")
+            for email, name in matched:
+                print(f"- {name} ({email})")
+        else:
+            print("No contacts online.")
         self.contacts = {}
         return False
 
@@ -166,8 +186,8 @@ class SecureDrop(cmd.Cmd):
 
         # Password acquisition loop
         while True:
-            password = getpass("Enter Password: ")
-            confirm_password = getpass("Re-enter Password: ")
+            password = input("Enter Password: ")
+            confirm_password = input("Re-enter Password: ")
             if len(password) == 0:
                 print("Error: Invalid password!")
             elif password != confirm_password:
@@ -209,13 +229,16 @@ class SecureDrop(cmd.Cmd):
             email = input("Enter Email Address: ").strip()
             if email.lower() == "exit":
                 self.clean_and_exit()
-            password = getpass("Enter Password: ")
+            password = input("Enter Password: ")
             try:
                 if self.validate_user(email, password):
+                    # Begin broadcasting online status after successful login
+                    self.discovery = SDNetwork.DiscoveryService(self.user["email"], self.user["full_name"])
+                    self.discovery.start()
                     return
                 else:
                     print("Email and Password Combination Invalid.\n")
-            except Exception:
+            except Exception as e:
                 print("Email and Password Combination Invalid.\n")
             attempts += 1
         print("Login failed: Maximum attempts reached")
@@ -242,6 +265,8 @@ class SecureDrop(cmd.Cmd):
     def clean_and_exit(self, code=0):
         self.user = {}
         self.contacts = {}
+        if self.discovery:
+            self.discovery.stop()
         print("Exiting SecureDrop")
         sys.exit(code)
 

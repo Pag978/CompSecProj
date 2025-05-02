@@ -4,7 +4,7 @@ import threading
 import time
 import json
 import logging
-import base64
+import struct
 
 from Crypto.Random import get_random_bytes
 
@@ -21,7 +21,8 @@ EXCHANGE_PORT = 60000
 SAVE_DIR = 'received_files' # Where the file will be saved.
 SESSION_TIMEOUT = 60        # Seconds of inactivity before session closes (unused atm)
 
-CHUNK_SIZE = 4096           # Max bytes of data to handle at a time
+CHUNK_SIZE = 4096           # Max bytes of data to process at a time
+CHUNK_HEADER_SIZE = 4
 
 logging.basicConfig(
     filename="Network.log",
@@ -62,6 +63,9 @@ class DiscoveryService(threading.Thread):
                 self._broadcast_presence()
                 last_broadcast = cur_time
             try:
+                # Still using CHUNK_SIZE here, should maybe use chunk header as implemented
+                # for file transfer in case unwanted data is added to the incoming packets.
+                # Not sure if this works the same for UDP though.
                 data, addr = self.sock.recvfrom(CHUNK_SIZE)
                 self._process_message(data, addr)
             except socket.timeout:
@@ -206,7 +210,11 @@ class FileTransferService(threading.Thread):
             with open(self.filepath, "rb") as file:
                 while chunk := file.read(CHUNK_SIZE):
                     encrypted_chunk = SDSecurity.encrypt_aes(chunk, self.session_key)
-                    self.sock.send(encrypted_chunk)
+                    # Add chunk header to address issues with TCP streaming & filesize
+                    # Tells receiver how much data it is expected to process in each individual chunk
+                    # Header size is 4 bytes, "!I" = unsigned int packed for network use (big-endian)
+                    chunk_header = struct.pack("!I", len(encrypted_chunk))
+                    self.sock.sendall(chunk_header + encrypted_chunk)
             logging.info(f"{self.filepath} sent successfully!")
         except Exception as e:
             logging.error(f"Error sending file: {e}")
@@ -274,7 +282,7 @@ class FileTransferListener(threading.Thread):
             logging.info("AES session key received!")
 
             # Receive info header by checking for newline
-            info = json.loads(readline_from_socket(sock).decode())
+            info = json.loads(recv_info_header(sock).decode())
             filesize = info.get("size")
             if filesize is None:
                 filesize = 0
@@ -285,12 +293,11 @@ class FileTransferListener(threading.Thread):
                 os.mkdir(SAVE_DIR)
             
             # Receive file in 4096-byte chunks
-            # Current limit is 4064-byte file size
             with open(outfile, "wb") as file:
                 while received < filesize:
-                    encrypted_chunk = sock.recv(CHUNK_SIZE)
-                    if not encrypted_chunk:
-                        break
+                    chunk_header = recv_n_bytes(sock, CHUNK_HEADER_SIZE)
+                    block_length = struct.unpack("!I", chunk_header)[0]
+                    encrypted_chunk = recv_n_bytes(sock, block_length)
                     chunk = SDSecurity.decrypt_aes(encrypted_chunk, session_key)
                     if chunk:
                         file.write(chunk)
@@ -306,8 +313,14 @@ class FileTransferListener(threading.Thread):
         logging.info("Stopping FileTransferListener.")
         self.running = False
 
-def readline_from_socket(sock):
-    """Read single bytes from socket until newline is encountered"""
+# Can't use exact number like chunk header since filesize can vary
+# Using newline as a delimiter instead.
+def recv_info_header(sock):
+    """
+    Reads single bytes from socket until newline is encountered.
+    Assumes a properly formatted incoming info header packet.\n
+    Returns JSON header containing info about incoming file.
+    """
     buffer = b""
     while True:
         data = sock.recv(1)
@@ -316,4 +329,15 @@ def readline_from_socket(sock):
         buffer += data
         if data == b"\n":
             break
+    return buffer
+
+def recv_n_bytes(sock, n):
+    """Returns `n` bytes read from `sock`."""
+    buffer = b""
+    # Ensures all expected bytes are received properly
+    while len(buffer) < n:
+        data = sock.recv(n - len(buffer))
+        if not data:
+            raise Exception("Connection closed")
+        buffer += data
     return buffer

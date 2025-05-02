@@ -1,9 +1,7 @@
 import os
 import json
-import random
 import stat
 import hashlib
-import hmac
 import base64
 
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -15,7 +13,6 @@ from Crypto.Hash import SHA256
 ITERATIONS = 100000     # PBKDF2 hash work factor (tweak according to performance/security needs)
 SALT_SIZE = 16          # 16-byte salt used for hashing
 PEPPER_SIZE = 16        # 16-byte pepper used for hashing
-# PICKLE_SIZE = 16      # 16-byte pickle used for hashing
 AES_KEY_SIZE = 32       # 32-byte (256-bit) AES key
 RSA_KEY_SIZE = 2048     # 2048-bit RSA key 
 TAG_SIZE = 16           # AES-GCM generates 16-byte tag
@@ -43,17 +40,6 @@ def create_and_store_bytes(n, filepath):
     n_bytes = get_random_bytes(n)
     secure_write(n_bytes, filepath)
     return n_bytes
-
-# ----- Depricated -----
-# Pickles unused for now
-# def get_rand_pickle(filepath):
-#     pickle_jar = []
-#     with open(filepath, "rb") as file:
-#         pickle = file.read(PICKLE_SIZE)
-#         while pickle:
-#           pickle_jar.append(pickle)
-#           pickle = file.read(PICKLE_SIZE)
-#     return random.choice(pickle_jar)
 
 # ----- Encryption -----
 def encrypt_aes(data, key):
@@ -87,13 +73,13 @@ def encrypt_rsa(data, public_key):
     """Returns RSA encrypted `data` as bytes using receiver's public key"""
     rsa_key = RSA.import_key(public_key)
     cipher = PKCS1_OAEP.new(rsa_key)
-    return cipher.encrypt(data)
+    return base64.b64encode(cipher.encrypt(data))
 
 def decrypt_rsa(data, private_key):
     """Returns RSA decrypted `data` as bytes using receiver's private key"""
     rsa_key = RSA.import_key(private_key)
     cipher = PKCS1_OAEP.new(rsa_key)
-    return cipher.decrypt(data)
+    return cipher.decrypt(base64.b64decode(data))
 
 def sign_message(data, private_key):
     """Sign message using RSA private key"""
@@ -128,10 +114,10 @@ def create_certificate(email, full_name, public_key, private_key):
 
 def verify_certificate(cert):
     try:
-        email = cert["email"]
-        name = cert["name"]
-        pub_key = cert["public_key"]
-        sig = cert["signature"]
+        email = cert.get("email")
+        name = cert.get("name")
+        pub_key = cert.get("public_key")
+        sig = cert.get("signature")
         cert_string = f"{email}|{name}|{pub_key}"
         return verify_signature(cert_string, sig, pub_key)
     except:

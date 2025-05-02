@@ -31,19 +31,14 @@ USER_HASH_FILE = os.path.join(DATA_DIR, "user.hash.enc")
 CERT_FILE = os.path.join(DATA_DIR, "certificate.enc")
 KEY_FILE = os.path.join(DATA_DIR, "rsa_keys.enc")
 CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.enc")
-CONTACT_KEYS_FILE = os.path.join(DATA_DIR, "contact_keys.enc")
 SALT_FILE = os.path.join(DATA_DIR, "salt.enc")
 PEPPER_FILE = os.path.join(DATA_DIR, "pepper.enc")
-PICKLE_FILE = os.path.join(DATA_DIR, "pickle.enc")
 LOG_FILE = os.path.join(DATA_DIR, "report.log")
 
 SALT_SIZE = 16          # 16-byte salt used for hashing
 PEPPER_SIZE = 16        # 16-byte pepper used for hashing
 # PICKLE_SIZE = 16      # 16-byte pickle used for hashing
 MAX_ATTEMPTS = 5        # Max login attempts before program exits
-
-SERVER_HOST = 'localhost'
-SERVER_PORT = 8080
 
 logging.basicConfig(
     filename="App.log",
@@ -90,7 +85,7 @@ class SecureDrop(cmd.Cmd):
         List online contacts that meet the following criteria:
           1. You have added the contact (stored locally).
           2. The contact is detected as online on the same network.
-          3. (Future) The contact has reciprocated.
+          3. The contact has reciprocated.
         """
         contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
         if len(contacts) == 0:
@@ -103,8 +98,6 @@ class SecureDrop(cmd.Cmd):
         matched = []
         for email, info in contacts.items():
             if info.get("reciprocated", False) and email in online:
-                # For now, we assume reciprocation. Future work will add a mutual authentication
-                # handshake to be certain of reciprocal trust.
                 matched.append((email, info.get("full_name")))
         if matched:
             print("\nOnline Contacts:")
@@ -114,27 +107,34 @@ class SecureDrop(cmd.Cmd):
             print("No contacts online.")
         return False
 
+    # Current filesize limit = 4064 bytes, MAC check fails when larger 
     def do_send(self, arg):
         """Initiate file transfer with a contact"""
-        recipient_email = input("Enter recipient's email address: ")
-        file_path = input("Enter the file path to send: ")
-        try:
-            with open(file_path, "rb") as f:
-                file_data = f.read()
-
-            file_name = file_path.split("/")[-1]
-            encoded_file = base64.b64encode(file_data).decode('utf-8')
-
-            # Send the file transfer request to the server
-            self.send_request_to_server("send_file", {
-                "recipient": recipient_email,
-                "file_name": file_name,
-                "file_data": encoded_file
-            })
-            print(f"File '{file_name}' sent successfully!")
-
-        except Exception as e:
-            print(f"Error sending file: {e}")
+        email = input("Enter recipient's email address: ")
+        filepath = input("Enter the file path to send: ")
+        if not os.path.exists(filepath):
+            print(f"{filepath} not found.")
+            return
+        contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user.get("aes_key"))
+        if email not in contacts:
+            print(f"{email} not found in contacts.")
+            print("Use the 'add' command to make them a contact before initiating a file transfer.")
+            return
+        if not contacts.get(email).get("reciprocated", False):
+            print(f"{email} has not added you as a contact.")
+            print("Contacts must be mutual to initiate a file transfer.")
+        online = self.discovery.get_online_contacts()
+        if email not in online:
+            print(f"{email} is not online.")
+            return
+        peer_ip = online.get(email).get("ip")
+        peer_cert = online.get(email).get("certificate")
+        choice = input(f"Initiate transfer of {filepath} to {email}? (y/n): ")
+        if choice != "y":
+            print("File transfer cancelled.")
+            return
+        session = SDNetwork.FileTransferService(self.cert, peer_ip, peer_cert, filepath)
+        session.start()
 
     # For some reason the cmdloop stopped exiting when this was called,
     # so I decided to take matters into my own hands and hit it the sys.exit().
@@ -153,6 +153,9 @@ class SecureDrop(cmd.Cmd):
         else:
             # If user related files exist but users does not, users was likely deleted.
             # -Delete files so data isn't given to next registered user (also the new key wouldnt work).
+            # -There's probably prettier way to do this but there's bigger issues to fix rn
+            if os.path.exists(KEY_FILE): os.remove(KEY_FILE)
+            if os.path.exists(CERT_FILE): os.remove(CERT_FILE)
             if os.path.exists(CONTACTS_FILE): os.remove(CONTACTS_FILE)
             if os.path.exists(USER_HASH_FILE): os.remove(USER_HASH_FILE)
             if os.path.exists(SALT_FILE): os.remove(SALT_FILE)
@@ -181,13 +184,13 @@ class SecureDrop(cmd.Cmd):
     def register_user(self):
         try:
             """user registration."""
-            full_name = getpass("Enter Full Name: ").strip()
-            email = getpass("Enter Email Address: ").strip()
+            full_name = input("Enter Full Name: ").strip()
+            email = input("Enter Email Address: ").strip()
 
             # Password acquisition loop
             while True:
-                password = input("Enter Password: ")
-                confirm_password = input("Re-enter Password: ")
+                password = getpass("Enter Password: ")
+                confirm_password = getpass("Re-enter Password: ")
                 if len(password) == 0:
                     print("Error: Invalid password!")
                 elif password != confirm_password:
@@ -211,13 +214,11 @@ class SecureDrop(cmd.Cmd):
             SDSecurity.encrypt_and_store(user_data, USER_FILE, key)
             
             # Store email hash for login validation without leaking user data
-            # Don't think this is what the pickle is meant for, but idk what else to do with it
-            # The example powerpoint was not very clear on how pickles are applied
-            # Question: why not just use password for the hash key?
             email_hash = SDSecurity.hash_b2b(email.lower())
             email_encrypted = SDSecurity.encrypt_aes(email_hash, key)
             SDSecurity.secure_write(email_encrypted, USER_HASH_FILE)
 
+            # Create/store RSA key pair and user certificate
             private_key, public_key = SDSecurity.generate_rsa_key_pair()
             SDSecurity.encrypt_and_store({"private_key": private_key.decode(), "public_key": public_key.decode()}, KEY_FILE, key)
             cert = SDSecurity.create_certificate(email, full_name, public_key, private_key)
@@ -244,11 +245,12 @@ class SecureDrop(cmd.Cmd):
             password = getpass("Enter Password: ")
             try:
                 if self.validate_user(email, password):
-                    # Load user data & begin broadcasting online status after successful login
+                    # Load user data & start network services after successful login
                     self.rsa_keys = SDSecurity.load_and_decrypt(KEY_FILE, self.user.get("aes_key"))
                     self.cert = SDSecurity.load_and_decrypt(CERT_FILE, self.user.get("aes_key"))
                     self.start_discovery()
                     self.start_file_server()
+                    logging
                     return
                 else:
                     logging.error(f"Failed login attempt: no error (wrong email?)")
@@ -272,6 +274,7 @@ class SecureDrop(cmd.Cmd):
         ciphertext = SDSecurity.secure_read(USER_HASH_FILE)
         email_hash = SDSecurity.decrypt_aes(ciphertext, key)
         if  email_hash == SDSecurity.hash_b2b(email.lower()):
+            logging.info(f"{email} logged in.")
             self.user = SDSecurity.load_and_decrypt(USER_FILE, key)
             self.user["aes_key"] = key
             return True
@@ -279,6 +282,7 @@ class SecureDrop(cmd.Cmd):
             return False
     
     def start_discovery(self):
+        """Starts DiscoveryService thread (broadcasts online status)"""
         try:
             self.discovery = SDNetwork.DiscoveryService(self.cert, CONTACTS_FILE, self.user.get("aes_key"))
             self.discovery.start()
@@ -287,82 +291,26 @@ class SecureDrop(cmd.Cmd):
             logging.error(f"Failed to start discovery service: {e}")
     
     def start_file_server(self):
+        """Starts FileTransferListener thread (Listens for file transfer requests)"""
         try:
-            self.file_server = SDNetwork.FileTransferService()
+            self.file_server = SDNetwork.FileTransferListener(self.rsa_keys.get("private_key").encode(), self.cert)
             self.file_server.start()
+            logging.info("File transfer listener started.")
         except Exception as e:
-            logging.error(f"Failed to start file transfer service: {e}")
-
-        
-
-    def send_request_to_server(self, action, data):
-        """Connects to the server and sends a request with the given action and data"""
-        # Create a TCP socket
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.connect((SERVER_HOST, SERVER_PORT))
-        request = {
-            'action': action,
-            'data': data
-        }
-        # Send the JSON-encoded request to the serve and close after sending
-        client_socket.send(json.dumps(request).encode())
-        client_socket.close()
+            logging.error(f"Failed to start file listener: {e}")
     
     def clean_and_exit(self, code=0):
         self.user = {}
+        print("Shutting down background processes.")
         if self.discovery:
             self.discovery.stop()
+            self.discovery.join(timeout=1)
         if self.file_server:
             self.file_server.stop()
+            self.file_server.join(timeout=1)
         print("Exiting SecureDrop")
         logging.info("Exiting SecureDrop.")
         sys.exit(code)
-
-# ----- Depricated -----
-# Keeping around because I think multiple salts/peppers is probably a good idea
-# Will likely try implementing an improved version
-#
-# Check every permutation of the password with salt + pepper
-# Successful decryption = correct password
-# ISSUE: Leaking user data in memory if the correct password is used without the corresponding email
-# SOLUTION: Make hash of the email, encrypted with the same key, and use that
-# def validate_user(email, password):
-#     salts = []
-#     peppers = []
-#     pickle_jar = []
-#     with open(SALT_FILE, "rb") as file:
-#         salt = file.read(SALT_SIZE)
-#         while salt:
-#             salts.append(salt)
-#             salt = file.read(SALT_SIZE)
-#     with open(PEPPER_FILE, "rb") as file:
-#         pepper = file.read(PEPPER_SIZE)
-#         while pepper:
-#           peppers.append(pepper)
-#           pepper = file.read(PEPPER_SIZE)
-#     with open(PICKLE_FILE, "rb") as file:
-#         pickle = file.read(PICKLE_SIZE)
-#         while pickle:
-#           pickle_jar.append(pickle)
-#           pickle = file.read(PICKLE_SIZE)
-#     with open(USER_HASH_FILE, "rb") as file:
-#         ciphertext = file.read()
-
-#     for salt in salts:
-#         for pepper in peppers:
-#             try:
-#               key = SDSecurity.hash_b2b(password, salt, pepper)
-#               email_hash = SDSecurity.decrypt_aes(ciphertext, key)
-#               for pickle in pickle_jar:
-#                   # Hash function running may still tell attackers that password was right w/o knowing email?
-#                   if SDSecurity.hash_b2b(email, key=pickle) == email_hash:
-#                     user = SDSecurity.load_and_decrypt(USER_FILE, key)
-#                     # Password hash can be kept in memory after login? Theoretically requires knowing password anyway
-#                     user["password"] = key
-#                     return user
-#             except ValueError:
-#               pass
-#     return {}
 
 def main():
     app = SecureDrop()

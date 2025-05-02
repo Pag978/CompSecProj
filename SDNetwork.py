@@ -6,18 +6,22 @@ import json
 import logging
 import base64
 
+from Crypto.Random import get_random_bytes
+
 import SDSecurity
 
-# Networking parameters – these can be secured and enhanced later.
+# DiscoveryService parameters
 BROADCAST_PORT = 50000
-EXCHANGE_PORT = 60000
-BROADCAST_INTERVAL = 3      # seconds between successive broadcast messages
-OFFLINE_TIMEOUT = 6         # seconds after which a node is considered offline
+BROADCAST_INTERVAL = 3             # Seconds between successive broadcast messages
+OFFLINE_TIMEOUT = 6                # Seconds after which a user is considered offline
 BROADCAST_ADDRESS = '<broadcast>'  # UDP broadcast address
 
-SERVER_HOST = 'localhost'
-SERVER_PORT = 8080
-SAVE_DIRECTORY = '/home/receiver/received_files' # where the file will be saved.
+# FileTransferService parameters
+EXCHANGE_PORT = 60000
+SAVE_DIR = 'received_files' # Where the file will be saved.
+SESSION_TIMEOUT = 60        # Seconds of inactivity before session closes (unused atm)
+
+CHUNK_SIZE = 4096           # Max bytes of data to handle at a time
 
 logging.basicConfig(
     filename="Network.log",
@@ -58,7 +62,7 @@ class DiscoveryService(threading.Thread):
                 self._broadcast_presence()
                 last_broadcast = cur_time
             try:
-                data, addr = self.sock.recvfrom(4096)
+                data, addr = self.sock.recvfrom(CHUNK_SIZE)
                 self._process_message(data, addr)
             except socket.timeout:
                 pass
@@ -98,7 +102,7 @@ class DiscoveryService(threading.Thread):
                     # Update/add the contact with timestamp
                     self.online_contacts[sender_email] = {
                         "name": sender_name,
-                        "cert": cert,
+                        "certificate": cert,
                         "ip": addr[0],
                         "last_seen": time.time()
                     }
@@ -106,11 +110,11 @@ class DiscoveryService(threading.Thread):
                     contacts = SDSecurity.load_and_decrypt(self.contacts_file, self.aes_key)
                     if sender_email in contacts:
                         if self.cert.get("email") in sender_added:
-                            if not contacts[sender_email].get("reciprocated", False):
+                            if not contacts.get(sender_email).get("reciprocated", False):
                                 contacts[sender_email]["reciprocated"] = True
                                 SDSecurity.encrypt_and_store(contacts, self.contacts_file, self.aes_key)
                                 logging.info(f"Reciprocation established with {sender_email}")
-                        elif contacts[sender_email].get("reciprocated"):
+                        elif contacts.get(sender_email).get("reciprocated"):
                             # Update if reciprocation is lost (I feel like this constant file writing is bad)
                             contacts[sender_email]["reciprocated"] = False
                             SDSecurity.encrypt_and_store(contacts, self.contacts_file, self.aes_key)
@@ -124,8 +128,8 @@ class DiscoveryService(threading.Thread):
         cur_time = time.time()
         # Iterate over copy of dict, avoiding runtime error of changing dict size during iteration.
         for email, info in list(self.online_contacts.items()):
-            if cur_time - info["last_seen"] > OFFLINE_TIMEOUT:
-                del self.online_contacts[email]
+            if cur_time - info.get("last_seen") > OFFLINE_TIMEOUT:
+                self.online_contacts.pop(email)
                 logging.info(f"{email} went offline.")
 
     def get_online_contacts(self):
@@ -134,65 +138,182 @@ class DiscoveryService(threading.Thread):
     
     def stop(self):
         """Stop the broadcast listener thread."""
+        logging.info("Stopping DiscoveryService.")
         self.running = False
 
 class FileTransferService(threading.Thread):
-    def __init__(self):
-        self.running = True
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Allows testing w/ multiple terminals on the same machine
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1) # Allows testing w/ multiple terminals on the same machine
-        try:
-            self.sock.bind((SERVER_HOST, SERVER_PORT))
-        except Exception as e:
-            logging.error(f"FileTransferService bind error: {e}")
-        self.sock.listen(5)
-        logging.info(f"Server listening on {SERVER_HOST}:{SERVER_PORT}")
+    def __init__(self, cert, peer_ip, peer_cert, filepath):
+        threading.Thread.__init__(self)
+        self.cert = cert
+        self.peer_ip = peer_ip
+        self.peer_cert = peer_cert
+        self.filepath = filepath
+        self.session_key = None
+        self.sock = None
 
     def run(self):
-        while self.running:
-            client_socket, client_address = self.sock.accept()
-            print(f"Connection established with {client_address}")
-            self.handle_file_transfer_request(client_socket, client_address)
-        self.sock.close()
+        try:
+            self._initiate_session()
+            self._send_file()
+        except Exception as e:
+            logging.error(f"Error in file transfer session: {e}")
+        finally:
+            if self.sock:
+                logging.info("Closing FileTransferService socket.")
+                self.sock.close()
+    
+    def _initiate_session(self):
+        """Requests to start a file transfer session & performs AES key exchange if accepted"""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # -- Allow testing w/ multiple terminals on the same machine
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        
+        # Connect to receiving port & request to initiate transfer
+        self.sock.connect((self.peer_ip, EXCHANGE_PORT))
+        request = {
+            "type": "FILE_TRANSFER_REQUEST",
+            "certificate": self.cert,
+            "filename": os.path.basename(self.filepath)
+        }
+        self.sock.send(json.dumps(request).encode())
+        logging.info(f"Sent request for file transfer to {self.peer_cert['email']} at {self.peer_ip}")
+        response = json.loads(self.sock.recv(CHUNK_SIZE).decode())
+        if response.get("type") != "FILE_TRANSFER_APPROVED":
+            print("File transfer request was not approved.")
+            raise Exception("File transfer session not approved.")
 
-    def handle_file_transfer_request(self, client_socket, client_address):
-        # Read full data from socket in chunks
-        chunks = []
-        while True:
-            chunk = client_socket.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
+        # Create & exchange AES session key, encrypted with receiver's RSA public key
+        try:
+            self.session_key = get_random_bytes(SDSecurity.AES_KEY_SIZE)
+            peer_pub = self.peer_cert.get("public_key").encode()
+            encrypted_key = SDSecurity.encrypt_rsa(self.session_key.hex().encode(), peer_pub)
+            key_exchange = {"type": "SESSION_KEY", "key": encrypted_key.decode()}
+            self.sock.send(json.dumps(key_exchange).encode())
+            logging.info(f"File transfer session initiated with {self.peer_ip}!")
+        except Exception as e:
+            logging.error(f"Error performing key exchange: {e}")
+    
+    def _send_file(self):
+        """Sends file in 4096-byte chunks, encrypted with AES session key"""
+        try:
+            filesize = os.path.getsize(self.filepath)
+            data = json.dumps({"TYPE": "FILE_INFO", "size": filesize}).encode()
+            # Add newline delimiter so receiver knows when info header ends
+            data += b"\n"
+            self.sock.send(data)
+            logging.debug(f"Data sent: {data}")
+            with open(self.filepath, "rb") as file:
+                while chunk := file.read(CHUNK_SIZE):
+                    encrypted_chunk = SDSecurity.encrypt_aes(chunk, self.session_key)
+                    self.sock.send(encrypted_chunk)
+            logging.info(f"{self.filepath} sent successfully!")
+        except Exception as e:
+            logging.error(f"Error sending file: {e}")
 
-        # put all chunks into one string and decode as JSON
-        request = b''.join(chunks).decode()
-        request_data = json.loads(request)
+class FileTransferListener(threading.Thread):
+    def __init__(self, private_key, cert):
+        threading.Thread.__init__(self)
+        self.private_key = private_key
+        self.cert = cert
+        self.running = True
+        self.daemon = True
+    
+    def run(self):
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # -- Allow testing w/ multiple terminals on the same machine
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        try:
+            # Listen for incoming file transfer requests
+            server_sock.bind(("", EXCHANGE_PORT))
+            server_sock.listen(5)
+            logging.info(f"Listening for file transfer requests on port {EXCHANGE_PORT}.")
+            while self.running:
+                try:
+                    client_sock, addr = server_sock.accept()
+                    # -- Allow testing w/ multiple terminals on the same machine
+                    client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+                    client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    # Create handler thread for each incoming connection
+                    threading.Thread(target=self.handle_transfer, args=(client_sock, addr)).start()
+                except Exception as e:
+                    logging.error(f"Error accepting file transfer connection: {e}")
+        except Exception as e:
+            logging.error(f"Error initiating FileTransferListener: {e}")
+        finally:
+            server_sock.close()
 
-        # check if the request is to send a file
-        if request_data['action'] == 'send_file':
-            recipient_email = request_data['data']['recipient']
-            file_name = request_data['data']['file_name']
-            file_data = base64.b64decode(request_data['data']['file_data'])
-            print(f"Contact '{recipient_email}' is sending a file: {file_name}. Accept (y/n)?")
-            response = input()
+    def handle_transfer(self, sock, addr):
+        """Handles incoming file transfer requests"""
+        try:
+            # Receive request for transfer & prompt user for response
+            request = json.loads(sock.recv(CHUNK_SIZE).decode())
+            if request.get("type") != "FILE_TRANSFER_REQUEST":
+                logging.error("Invalid file transfer request received.")
+                sock.close()
+                return
+            email = request.get("certificate").get("email")
+            filename = request.get("filename", "unknown_file")
+            choice = input(f"{email} is requesting to transfer {filename}. Accept? (y/n): ").strip().lower()
+            if choice != "y":
+                sock.send(json.dumps({"type": "FILE_TRANSFER_DENIED"}).encode())
+                logging.info(f"Denied file transfer request from {email}.")
+                sock.close()
+                return
+            sock.send(json.dumps({"type": "FILE_TRANSFER_APPROVED"}).encode())
+            logging.info(f"Approved file transfer request from {email}.")
 
-            if response.lower() == 'y':
-                print(f"Saving file '{file_name}'...")
+            # Perform AES key exchange
+            key_exchange = json.loads(sock.recv(CHUNK_SIZE).decode())
+            if key_exchange.get("type") != "SESSION_KEY":
+                raise Exception("AES session key not received.")
+            encrypted_key = key_exchange.get("key")
+            decrypted_hex = SDSecurity.decrypt_rsa(encrypted_key, self.private_key.decode())
+            session_key = bytes.fromhex(decrypted_hex.decode())
+            logging.info("AES session key received!")
 
-                # Makes sure if directory exists
-                if not os.path.exists(SAVE_DIRECTORY):
-                    os.makedirs(SAVE_DIRECTORY)
-                file_path = os.path.join(SAVE_DIRECTORY, file_name)
-                with open(file_path, 'wb') as file:
-                    file.write(file_data)
-
-                print(f"File '{file_name}' has been successfully transferred.")
-            else:
-                print("File transfer has been denied.")
-        client_socket.close()
+            # Receive info header by checking for newline
+            info = json.loads(readline_from_socket(sock).decode())
+            filesize = info.get("size")
+            if filesize is None:
+                filesize = 0
+                raise Exception("Filesize is 'None', is the file empty?")
+            received = 0
+            outfile = os.path.join(SAVE_DIR, filename)
+            if not os.path.exists(SAVE_DIR):
+                os.mkdir(SAVE_DIR)
+            
+            # Receive file in 4096-byte chunks
+            # Current limit is 4064-byte file size
+            with open(outfile, "wb") as file:
+                while received < filesize:
+                    encrypted_chunk = sock.recv(CHUNK_SIZE)
+                    if not encrypted_chunk:
+                        break
+                    chunk = SDSecurity.decrypt_aes(encrypted_chunk, session_key)
+                    if chunk:
+                        file.write(chunk)
+                        received += len(chunk)
+            logging.info(f"{filename} received and saved to {outfile}!")
+            print(f"{filename} received and saved to '{outfile}'!")
+        except Exception as e:
+            logging.error(f"Error receiving file: {e}")
+        finally:
+            sock.close()
     
     def stop(self):
-        """Stop the file server thread."""
+        logging.info("Stopping FileTransferListener.")
         self.running = False
-    
+
+def readline_from_socket(sock):
+    """Read single bytes from socket until newline is encountered"""
+    buffer = b""
+    while True:
+        data = sock.recv(1)
+        if not data:
+            break
+        buffer += data
+        if data == b"\n":
+            break
+    return buffer

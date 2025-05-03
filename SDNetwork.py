@@ -1,4 +1,5 @@
 import os
+import sys
 import socket
 import threading
 import time
@@ -7,6 +8,7 @@ import logging
 import struct
 
 from Crypto.Random import get_random_bytes
+from queue import Queue, Empty
 
 import SDSecurity
 
@@ -22,7 +24,10 @@ SAVE_DIR = 'received_files' # Where the file will be saved.
 SESSION_TIMEOUT = 60        # Seconds of inactivity before session closes (unused atm)
 
 CHUNK_SIZE = 4096           # Max bytes of data to process at a time
-CHUNK_HEADER_SIZE = 4
+CHUNK_HEADER_SIZE = 4       # Size of the header sent with file chunks (A single unsigned int)
+
+print_lock = threading.Lock()   # Thread lock for printing to stdout
+input_requests = Queue()        # Queue to send input requests to the main thread
 
 logging.basicConfig(
     filename="Network.log",
@@ -184,7 +189,7 @@ class FileTransferService(threading.Thread):
         logging.info(f"Sent request for file transfer to {self.peer_cert['email']} at {self.peer_ip}")
         response = json.loads(self.sock.recv(CHUNK_SIZE).decode())
         if response.get("type") != "FILE_TRANSFER_APPROVED":
-            print("File transfer request was not approved.")
+            safe_print("File transfer request was not approved.")
             raise Exception("File transfer session not approved.")
 
         # Create & exchange AES session key, encrypted with receiver's RSA public key
@@ -263,7 +268,7 @@ class FileTransferListener(threading.Thread):
                 return
             email = request.get("certificate").get("email")
             filename = request.get("filename", "unknown_file")
-            choice = input(f"{email} is requesting to transfer {filename}. Accept? (y/n): ").strip().lower()
+            choice = request_input(f"{email} is requesting to transfer {filename}. Accept? (y/n): ").strip().lower()
             if choice != "y":
                 sock.send(json.dumps({"type": "FILE_TRANSFER_DENIED"}).encode())
                 logging.info(f"Denied file transfer request from {email}.")
@@ -303,7 +308,7 @@ class FileTransferListener(threading.Thread):
                         file.write(chunk)
                         received += len(chunk)
             logging.info(f"{filename} received and saved to {outfile}!")
-            print(f"{filename} received and saved to '{outfile}'!")
+            safe_print(f"{filename} received and saved to '{outfile}'!")
         except Exception as e:
             logging.error(f"Error receiving file: {e}")
         finally:
@@ -341,3 +346,14 @@ def recv_n_bytes(sock, n):
             raise Exception("Connection closed")
         buffer += data
     return buffer
+
+def request_input(prompt):
+    response = Queue(1)
+    input_requests.put((prompt, response))
+    return response.get()
+
+# Thread safe printing so that it doesn't interfere as much with the cmd shell
+def safe_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
+        sys.stdout.flush()

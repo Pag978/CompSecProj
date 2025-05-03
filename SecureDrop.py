@@ -1,15 +1,13 @@
 import cmd
-import json
 import sys
 import os
 import datetime
 import stat
-import base64
-import socket
 import logging
 import traceback
 
 from getpass import getpass
+from queue import Queue, Empty
 
 import SDSecurity
 import SDNetwork
@@ -52,11 +50,13 @@ class SecureDrop(cmd.Cmd):
 
     def __init__(self):
         super().__init__()
-        self.user = None  # Only 1 user supported
-        self.rsa_keys = None
-        self.cert = None
-        self.discovery = None   # Discovery service instance
-        self.file_server = None
+        self.user = None                                # Only 1 user supported
+        self.rsa_keys = None                            # RSA key pair
+        self.cert = None                                # Signed certificate for authentication
+        self.discovery = None                           # DiscoveryService instance
+        self.file_server = None                         # FileTransferListener instance
+        self.input_requests = SDNetwork.input_requests  # Input requests from background services
+
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR, stat.S_IRWXU)
 
@@ -164,6 +164,10 @@ class SecureDrop(cmd.Cmd):
 
     def precmd(self, line):
         return line.lower()
+    
+    def postcmd(self, stop, line):
+        self.process_input_requests()
+        return stop
 
     # ----- Custom Methods -----
     def first_time_setup(self):
@@ -299,6 +303,15 @@ class SecureDrop(cmd.Cmd):
         except Exception as e:
             logging.error(f"Failed to start file listener: {e}")
     
+    def process_input_requests(self):
+        while True:
+            try:
+                prompt, response_queue = self.input_requests.get_nowait()
+            except Empty:
+                break
+            response = input(prompt)
+            response_queue.put(response)
+
     def clean_and_exit(self, code=0):
         self.user = {}
         print("Shutting down background processes.")

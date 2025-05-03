@@ -14,20 +14,20 @@ import SDSecurity
 
 # DiscoveryService parameters
 BROADCAST_PORT = 50000
-BROADCAST_INTERVAL = 3             # Seconds between successive broadcast messages
-OFFLINE_TIMEOUT = 6                # Seconds after which a user is considered offline
-BROADCAST_ADDRESS = '<broadcast>'  # UDP broadcast address
+BROADCAST_INTERVAL = 3              # Seconds between successive broadcast messages
+OFFLINE_TIMEOUT = 6                 # Seconds after which a user is considered offline
+BROADCAST_ADDRESS = '<broadcast>'   # UDP broadcast address
 
 # FileTransferService parameters
 EXCHANGE_PORT = 60000
-SAVE_DIR = 'received_files' # Where the file will be saved.
-SESSION_TIMEOUT = 60        # Seconds of inactivity before session closes (unused atm)
+SAVE_DIR = 'received_files'         # Where the file will be saved.
+SESSION_TIMEOUT = 60                # Seconds of inactivity before session closes (unused atm)
 
-CHUNK_SIZE = 4096           # Max bytes of data to process at a time
-CHUNK_HEADER_SIZE = 4       # Size of the header sent with file chunks (A single unsigned int)
+CHUNK_SIZE = 4096                   # Max bytes of data to process at a time
+CHUNK_HEADER_SIZE = 4               # Size of the header sent with file chunks (A single unsigned int)
 
-print_lock = threading.Lock()   # Thread lock for printing to stdout
-input_requests = Queue()        # Queue to send input requests to the main thread
+print_lock = threading.Lock()       # Thread lock for printing to stdout
+input_requests = Queue()            # Queue to send input requests to the main thread
 
 # Logging for network activity
 SDN_log = logging.getLogger("SDNetwork")

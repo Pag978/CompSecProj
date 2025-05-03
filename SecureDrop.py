@@ -31,17 +31,16 @@ KEY_FILE = os.path.join(DATA_DIR, "rsa_keys.enc")
 CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.enc")
 SALT_FILE = os.path.join(DATA_DIR, "salt.enc")
 PEPPER_FILE = os.path.join(DATA_DIR, "pepper.enc")
-LOG_FILE = os.path.join(DATA_DIR, "report.log")
+LOG_FILE = os.path.join(DATA_DIR, "Client.log")
 
 SALT_SIZE = 16          # 16-byte salt used for hashing
 PEPPER_SIZE = 16        # 16-byte pepper used for hashing
-# PICKLE_SIZE = 16      # 16-byte pickle used for hashing
 MAX_ATTEMPTS = 5        # Max login attempts before program exits
 
 # Logging for the SecureDrop application
 SD_log = logging.getLogger("SDApp")
 SD_log.setLevel(logging.DEBUG)
-SD_handler = logging.FileHandler("Client.log")
+SD_handler = logging.FileHandler(LOG_FILE)
 SD_formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
 SD_handler.setFormatter(SD_formatter)
 SD_log.addHandler(SD_handler)
@@ -65,27 +64,26 @@ class SecureDrop(cmd.Cmd):
     # ----- SecureDrop Commands -----
     def do_add(self, arg):
         """Add or update a contact"""
-        # Minimizing time secure data is in memory by loading contacts only when used
         try:
-            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
+            # Minimizing time secure data is in memory by loading contacts only when used
+            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user.get("aes_key"))
             email = input("Enter contact's email address: ").strip()
             if email in contacts:
                 print("Contact already exists. Updating information.")
             name = input("Enter contact's full name: ").strip()
-            
-            # update/save contacts, then empty variable
             contacts[email] = {
                 "full_name": name,
                 "reciprocated": False,
                 "last_updated": datetime.datetime.now().isoformat()
             }
-            SDSecurity.encrypt_and_store(contacts, CONTACTS_FILE, self.user["aes_key"])
+
+            SDSecurity.encrypt_and_store(contacts, CONTACTS_FILE, self.user.get("aes_key"))
             print("Contact added successfully!")
-            SD_log.info(f"New contact added: {contacts[email]}")
+            SD_log.info(f"New contact added: {contacts.get(email)}")
         except Exception as e:
             SD_log.error(f"Error adding new contact: {e}")
             print("An error occurred while adding new contact!")
-            print("See 'Client.log' for more details")
+            print(f"See '{LOG_FILE}' for more details")
 
     def do_list(self, arg):
         """
@@ -95,7 +93,7 @@ class SecureDrop(cmd.Cmd):
           3. Has this user saved as a contact.
         """
         try: 
-            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
+            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user.get("aes_key"))
             if len(contacts) == 0:
                 print("No contacts found.")
                 return False
@@ -169,8 +167,10 @@ class SecureDrop(cmd.Cmd):
 
     # ----- CLI Management -----
     def preloop(self):
-        """Check if user is registered. Initialize first time setup if not,
-        continue with user login otherwise"""
+        """
+        Check if user is registered. Initialize first time setup if not,
+        continue with user login otherwise
+        """
         if os.path.exists(USER_FILE):
             self.user_login()
         else:
@@ -263,7 +263,7 @@ class SecureDrop(cmd.Cmd):
             SD_log.info("User registered successfully!")
             return
         except Exception as e:
-            SD_log.error(f"Registration error: {type(e).__name__} - {e}\n")
+            SD_log.critical(f"Registration error: {type(e).__name__} - {e}\n")
             with open("Client.log", "a") as log:
                 traceback.print_exc(file=log)
             print("An error occurred during registration!")
@@ -297,10 +297,7 @@ class SecureDrop(cmd.Cmd):
             attempts += 1
         print("Login failed: Maximum attempts reached")
         # Log failed attempt and exit program
-        time = datetime.datetime.now()
-        with open(LOG_FILE, "a") as file:
-            file.write(time.strftime("%c") + "\n")
-        os.chmod(LOG_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        SD_log.warning("Login failed - Maximum login attempts reached!")
         self.clean_and_exit(1)
     
     def validate_user(self, email, password):

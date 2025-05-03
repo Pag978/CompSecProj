@@ -12,17 +12,12 @@ from queue import Queue, Empty
 import SDSecurity
 import SDNetwork
 
-# TODO: Add integrity checks for contact info (Compare hashes from before encryption and after decryption?)
-# - Main question: What would be a good solution for storing these hashes? (original data needs to be accessible)
-# - Might make sense to just include contact info in user data?
-# TODO: Improve security for user data/passsword
-# - Add password requirements
-# - Sanitize user input
-# TODO: Add Certificate Authority stuff
+# TODO: Add Certificate Authority stuff(?)
+# TODO: Figure out what the "pickle" is used for (see example ppt)
 # TODO: Improve overall file integrity
 # - Example ppt mentions using timestamps?
-# TODO: Figure out what the "pickle" is used for (see example ppt)
 
+# Filepaths used in application
 DATA_DIR = "user_data"
 USER_FILE = os.path.join(DATA_DIR, "user.enc")
 USER_HASH_FILE = os.path.join(DATA_DIR, "user.hash.enc")
@@ -57,11 +52,11 @@ class SecureDrop(cmd.Cmd):
         self.discovery = None                           # DiscoveryService instance
         self.file_server = None                         # FileTransferListener instance
         self.input_requests = SDNetwork.input_requests  # Input requests from background services
-
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR, stat.S_IRWXU)
 
     # ----- SecureDrop Commands -----
+    # TODO: Sanitize user input
     def do_add(self, arg):
         """Add or update a contact"""
         try:
@@ -188,6 +183,7 @@ class SecureDrop(cmd.Cmd):
     def precmd(self, line):
         return line.lower()
     
+    # TODO: Get file transfer request interaction to occur without needing to update the cmd shell
     def postcmd(self, stop, line):
         self.process_input_requests()
         return stop
@@ -207,7 +203,7 @@ class SecureDrop(cmd.Cmd):
                 print("Response not recognized.")
                 response = input("Please enter 'yes'(y) or 'no'(n): ")
 
-    # Should improve input validation here
+    # TODO: Add password requirements & sanitize user input
     def register_user(self):
         """User registration."""
         try:
@@ -215,6 +211,7 @@ class SecureDrop(cmd.Cmd):
             email = input("Enter Email Address: ").strip()
 
             # Password acquisition loop
+            
             while True:
                 password = getpass("Enter Password: ")
                 confirm_password = getpass("Re-enter Password: ")
@@ -271,7 +268,7 @@ class SecureDrop(cmd.Cmd):
             print("See 'Client.log' for more details")
             if os.path.exists(USER_FILE): os.remove(USER_FILE)
 
-
+    # TODO: Sanitize user input
     def user_login(self):
         """Login user with email + password"""
         attempts = 0

@@ -48,14 +48,17 @@ class DiscoveryService(threading.Thread):
     def __init__(self, certificate, contacts_file, aes_key):
         threading.Thread.__init__(self)
         self.cert = certificate
-        self.contacts_file = contacts_file # Probably inefficient to constantly be reading from the file
+        self.contacts_file = contacts_file  # Probably inefficient to constantly be reading from the file
         self.aes_key = aes_key
-        self.online_contacts = {}       # { email: { "name": ..., "last_seen": ... } }
+        self.online_contacts = {}           # { email: { "name": ..., "last_seen": ... } }
         self.running = True
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Allows testing w/ multiple terminals on the same machine
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1) # Allows testing w/ multiple terminals on the same machine
+        
+        # Allow testing w/ multiple terminals on the same machine
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        
         try:
             self.sock.bind(("", BROADCAST_PORT))
         except Exception as e:
@@ -90,13 +93,13 @@ class DiscoveryService(threading.Thread):
             "type": "DISCOVER",
             "certificate": self.cert,
             "added": list(contacts.keys())
-            # Future: include a flag or a signature to prove reciprocal contact
         })
         try:
             self.sock.sendto(message.encode(), (BROADCAST_ADDRESS, BROADCAST_PORT))
         except Exception as e:
             SDN_log.error(f"Broadcast error: {e}")
     
+    # TODO: Refactor this into multiple functions (too many indents is gross)
     def _process_message(self, data, addr):
         """Process incoming broadcast messages"""
         try:
@@ -129,7 +132,6 @@ class DiscoveryService(threading.Thread):
                             # Update if reciprocation is lost (I feel like this constant file writing is bad)
                             contacts[sender_email]["reciprocated"] = False
                             SDSecurity.encrypt_and_store(contacts, self.contacts_file, self.aes_key)
-
         except Exception as e:
             # ignore invalid/unauthenticated packets
             SDN_log.error(f"Error processing discovery message: {e}")
@@ -176,7 +178,8 @@ class FileTransferService(threading.Thread):
     def _initiate_session(self):
         """Requests to start a file transfer session & performs AES key exchange if accepted"""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # -- Allow testing w/ multiple terminals on the same machine
+        
+        # Allow testing w/ multiple terminals on the same machine
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         
@@ -205,6 +208,8 @@ class FileTransferService(threading.Thread):
         except Exception as e:
             SDN_log.error(f"Error performing key exchange: {e}")
     
+    # Uses chunk header to address issues with TCP streaming & filesize,
+    # tells receiver how much data it is expected to process in each individual chunk
     def _send_file(self):
         """Sends file in 4096-byte chunks, encrypted with AES session key"""
         try:
@@ -217,9 +222,7 @@ class FileTransferService(threading.Thread):
             with open(self.filepath, "rb") as file:
                 while chunk := file.read(CHUNK_SIZE):
                     encrypted_chunk = SDSecurity.encrypt_aes(chunk, self.session_key)
-                    # Add chunk header to address issues with TCP streaming & filesize
-                    # Tells receiver how much data it is expected to process in each individual chunk
-                    # Header size is 4 bytes, "!I" = unsigned int packed for network use (big-endian)
+                    # Header size is 4 bytes, "!I" => unsigned int packed for network use (big-endian)
                     chunk_header = struct.pack("!I", len(encrypted_chunk))
                     self.sock.sendall(chunk_header + encrypted_chunk)
             SDN_log.info(f"{self.filepath} sent successfully!")
@@ -262,12 +265,14 @@ class FileTransferListener(threading.Thread):
     def handle_transfer(self, sock, addr):
         """Handles incoming file transfer requests"""
         try:
-            # Receive request for transfer & prompt user for response
+            # Get packet & check for valid packet type
             request = json.loads(sock.recv(CHUNK_SIZE).decode())
             if request.get("type") != "FILE_TRANSFER_REQUEST":
                 SDN_log.error("Invalid file transfer request received.")
                 sock.close()
                 return
+            
+            # Prompt user to accept/decline file transfer
             email = request.get("certificate").get("email")
             filename = request.get("filename", "unknown_file")
             choice = request_input(f"{email} is requesting to transfer {filename}. Accept? (y/n): ").strip().lower()

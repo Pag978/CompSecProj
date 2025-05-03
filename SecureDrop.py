@@ -38,11 +38,13 @@ PEPPER_SIZE = 16        # 16-byte pepper used for hashing
 # PICKLE_SIZE = 16      # 16-byte pickle used for hashing
 MAX_ATTEMPTS = 5        # Max login attempts before program exits
 
-logging.basicConfig(
-    filename="App.log",
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s: %(message)s"
-)
+# Logging for the SecureDrop application
+SD_log = logging.getLogger("SDApp")
+SD_log.setLevel(logging.DEBUG)
+SD_handler = logging.FileHandler("Client.log")
+SD_formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
+SD_handler.setFormatter(SD_formatter)
+SD_log.addHandler(SD_handler)
 
 class SecureDrop(cmd.Cmd):
     intro = "Welcome to SecureDrop.\nType 'help' or ? to list commands.\n"
@@ -64,80 +66,101 @@ class SecureDrop(cmd.Cmd):
     def do_add(self, arg):
         """Add or update a contact"""
         # Minimizing time secure data is in memory by loading contacts only when used
-        contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
-        email = input("Enter contact's email address: ").strip()
-        if email in contacts:
-            print("Contact already exists. Updating information.")
-        name = input("Enter contact's full name: ").strip()
-        
-        # update/save contacts, then empty variable
-        contacts[email] = {
-            "full_name": name,
-            "reciprocated": False,
-            "last_updated": datetime.datetime.now().isoformat()
-        }
-        SDSecurity.encrypt_and_store(contacts, CONTACTS_FILE, self.user["aes_key"])
-        print("Contact added successfully!")
-        return False
+        try:
+            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
+            email = input("Enter contact's email address: ").strip()
+            if email in contacts:
+                print("Contact already exists. Updating information.")
+            name = input("Enter contact's full name: ").strip()
+            
+            # update/save contacts, then empty variable
+            contacts[email] = {
+                "full_name": name,
+                "reciprocated": False,
+                "last_updated": datetime.datetime.now().isoformat()
+            }
+            SDSecurity.encrypt_and_store(contacts, CONTACTS_FILE, self.user["aes_key"])
+            print("Contact added successfully!")
+            SD_log.info(f"New contact added: {contacts[email]}")
+        except Exception as e:
+            SD_log.error(f"Error adding new contact: {e}")
+            print("An error occurred while adding new contact!")
+            print("See 'Client.log' for more details")
 
     def do_list(self, arg):
         """
-        List online contacts that meet the following criteria:
-          1. You have added the contact (stored locally).
-          2. The contact is detected as online on the same network.
-          3. The contact has reciprocated.
+        List users that meet the following criteria:
+          1. Detected as online.
+          2. Saved as a contact.
+          3. Has this user saved as a contact.
         """
-        contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
-        if len(contacts) == 0:
-            print("No contacts found.")
-            return False
-        online = {}
-        if self.discovery:
-            online = self.discovery.get_online_contacts()
+        try: 
+            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user["aes_key"])
+            if len(contacts) == 0:
+                print("No contacts found.")
+                return False
+            online = {}
+            if self.discovery:
+                online = self.discovery.get_online_contacts()
 
-        matched = []
-        for email, info in contacts.items():
-            if info.get("reciprocated", False) and email in online:
-                matched.append((email, info.get("full_name")))
-        if matched:
-            print("\nOnline Contacts:")
-            for email, name in matched:
-                print(f"- {name} ({email})")
-        else:
-            print("No contacts online.")
-        return False
+            matched = []
+            for email, info in contacts.items():
+                if info.get("reciprocated", False) and email in online:
+                    matched.append((email, info.get("full_name")))
+            if matched:
+                print("\nOnline Contacts:")
+                for email, name in matched:
+                    print(f"- {name} ({email})")
+                print()
+            else:
+                print("No contacts online.")
+        except Exception as e:
+            SD_log.error(f"Error listing contacts: {e}")
+            print("An error occurred while listing contacts!")
+            print("See the logs for more details")
 
-    # Current filesize limit = 4064 bytes, MAC check fails when larger 
     def do_send(self, arg):
         """Initiate file transfer with a contact"""
-        email = input("Enter recipient's email address: ")
-        filepath = input("Enter the file path to send: ")
-        if not os.path.exists(filepath):
-            print(f"{filepath} not found.")
-            return
-        contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user.get("aes_key"))
-        if email not in contacts:
-            print(f"{email} not found in contacts.")
-            print("Use the 'add' command to make them a contact before initiating a file transfer.")
-            return
-        if not contacts.get(email).get("reciprocated", False):
-            print(f"{email} has not added you as a contact.")
-            print("Contacts must be mutual to initiate a file transfer.")
-        online = self.discovery.get_online_contacts()
-        if email not in online:
-            print(f"{email} is not online.")
-            return
-        peer_ip = online.get(email).get("ip")
-        peer_cert = online.get(email).get("certificate")
-        choice = input(f"Initiate transfer of {filepath} to {email}? (y/n): ")
-        if choice != "y":
-            print("File transfer cancelled.")
-            return
-        session = SDNetwork.FileTransferService(self.cert, peer_ip, peer_cert, filepath)
-        session.start()
+        try:
+            email = input("Enter recipient's email address: ")
+            filepath = input("Enter the file path to send: ")
+            # Check if file exists
+            if not os.path.exists(filepath):
+                print(f"{filepath} not found.")
+                return
+            
+            # Check if target user is a contact
+            contacts = SDSecurity.load_and_decrypt(CONTACTS_FILE, self.user.get("aes_key"))
+            if email not in contacts:
+                print(f"{email} not found in contacts.")
+                print("Use the 'add' command to make them a contact before initiating a file transfer.")
+                return
+            
+            # Check if contact has reciprocated
+            if not contacts.get(email).get("reciprocated", False):
+                print(f"{email} has not added you as a contact.")
+                print("Contacts must be mutual to initiate a file transfer.")
+
+            # Check if contact is online
+            online = self.discovery.get_online_contacts()
+            if email not in online:
+                print(f"{email} is not online.")
+                return
+            
+            # Begin file transfer session
+            peer_ip = online.get(email).get("ip")
+            peer_cert = online.get(email).get("certificate")
+            choice = input(f"Initiate transfer of {filepath} to {email}? (y/n): ")
+            if choice != "y":
+                print("File transfer cancelled.")
+                return
+            session = SDNetwork.FileTransferService(self.cert, peer_ip, peer_cert, filepath)
+            session.start()
+        except Exception as e:
+            SD_log.error(f"Error sending file (check network log): {e}")
 
     # For some reason the cmdloop stopped exiting when this was called,
-    # so I decided to take matters into my own hands and hit it the sys.exit().
+    # so I decided to take matters into my own hands and hit it with the sys.exit().
     # -Keeping 'return True' because that is theoretically how this is supposed to exit.
     def do_exit(self, arg):
         """Exits the SecureDrop shell"""
@@ -186,8 +209,8 @@ class SecureDrop(cmd.Cmd):
 
     # Should improve input validation here
     def register_user(self):
+        """User registration."""
         try:
-            """user registration."""
             full_name = input("Enter Full Name: ").strip()
             email = input("Enter Email Address: ").strip()
 
@@ -201,9 +224,11 @@ class SecureDrop(cmd.Cmd):
                     print("Error: Passwords do not match!")
                 else:
                     print("Passwords Match!")
+                    # Derived AES key from password and pseudo-random salt/pepper
                     salt = SDSecurity.create_and_store_bytes(SALT_SIZE, SALT_FILE)
                     pepper = SDSecurity.create_and_store_bytes(PEPPER_SIZE, PEPPER_FILE)
                     key = SDSecurity.derive_key_pbkdf2(password, salt, pepper)
+                    SD_log.info("AES Key generated successfully!")
                     break
             
             # Password is not stored, instead it is used as the encryption key for user data
@@ -216,28 +241,36 @@ class SecureDrop(cmd.Cmd):
                 "created": datetime.datetime.now().isoformat()
             }
             SDSecurity.encrypt_and_store(user_data, USER_FILE, key)
-            
+
             # Store email hash for login validation without leaking user data
             email_hash = SDSecurity.hash_b2b(email.lower())
             email_encrypted = SDSecurity.encrypt_aes(email_hash, key)
             SDSecurity.secure_write(email_encrypted, USER_HASH_FILE)
 
-            # Create/store RSA key pair and user certificate
+            # Create RSA key pair
             private_key, public_key = SDSecurity.generate_rsa_key_pair()
             SDSecurity.encrypt_and_store({"private_key": private_key.decode(), "public_key": public_key.decode()}, KEY_FILE, key)
+            SD_log.info("RSA keys generated successfully!")
+
+            # Create user certificate
             cert = SDSecurity.create_certificate(email, full_name, public_key, private_key)
             SDSecurity.encrypt_and_store(cert, CERT_FILE, key)
+            SD_log.info("Certificate generated successfully!")
+            SD_log.error(f"Error encrypting/storing user data: {e}")
 
             print("User registered successfully!")
             print("SecureDrop will now exit, restart and login to enter the SecureDrop shell.")
-            logging.info("User registered successfully!")
+            SD_log.info("User registered successfully!")
             return
         except Exception as e:
-            print("Registration failed.")
-            print(f"Exception: {type(e).__name__} - {e}")
-            print("Traceback:")
-            traceback.print_exc(file=sys.stdout)
-            logging.error(f"Registration error: {e}")
+            SD_log.error(f"Registration error: {type(e).__name__} - {e}\n")
+            with open("Client.log", "a") as log:
+                traceback.print_exc(file=log)
+            print("An error occurred during registration!")
+            print(f"'{DATA_DIR}' files may have been corrupted and will be deleted on next startup.")
+            print("See 'Client.log' for more details")
+            if os.path.exists(USER_FILE): os.remove(USER_FILE)
+
 
     def user_login(self):
         """Login user with email + password"""
@@ -254,13 +287,12 @@ class SecureDrop(cmd.Cmd):
                     self.cert = SDSecurity.load_and_decrypt(CERT_FILE, self.user.get("aes_key"))
                     self.start_discovery()
                     self.start_file_server()
-                    logging
                     return
                 else:
-                    logging.error(f"Failed login attempt: no error (wrong email?)")
+                    SD_log.error(f"Failed login attempt: no error (wrong email?)")
                     print("Email and Password Combination Invalid.\n")
             except Exception as e:
-                logging.error(f"Failed login attempt: {e}")
+                SD_log.error(f"Failed login attempt: {e}")
                 print("Email and Password Combination Invalid.\n")
             attempts += 1
         print("Login failed: Maximum attempts reached")
@@ -272,15 +304,20 @@ class SecureDrop(cmd.Cmd):
         self.clean_and_exit(1)
     
     def validate_user(self, email, password):
+        """Returns `True` given valid email & password combination, `False` otherwise."""
+        # Derive key from given password
         salt = SDSecurity.secure_read(SALT_FILE)
         pepper = SDSecurity.secure_read(PEPPER_FILE)
         key = SDSecurity.derive_key_pbkdf2(password, salt, pepper)
+        
+        # Attempt to decrypt email hash using derived key, then compare to hash of given email
         ciphertext = SDSecurity.secure_read(USER_HASH_FILE)
         email_hash = SDSecurity.decrypt_aes(ciphertext, key)
         if  email_hash == SDSecurity.hash_b2b(email.lower()):
-            logging.info(f"{email} logged in.")
+            # Success indicates correct password and email combination, proceed with login
             self.user = SDSecurity.load_and_decrypt(USER_FILE, key)
             self.user["aes_key"] = key
+            SD_log.info(f"{email} logged in.")
             return True
         else:
             return False
@@ -290,40 +327,55 @@ class SecureDrop(cmd.Cmd):
         try:
             self.discovery = SDNetwork.DiscoveryService(self.cert, CONTACTS_FILE, self.user.get("aes_key"))
             self.discovery.start()
-            logging.info("Discovery service started.")
+            SD_log.info("Discovery service started.")
         except Exception as e:
-            logging.error(f"Failed to start discovery service: {e}")
+            SD_log.error(f"Failed to start discovery service: {e}")
+            print("Error starting discovery service!")
+            print("Online services will not function, restarting SecureDrop is recommended.")
+            print("See the logs for more details.")
     
     def start_file_server(self):
         """Starts FileTransferListener thread (Listens for file transfer requests)"""
         try:
             self.file_server = SDNetwork.FileTransferListener(self.rsa_keys.get("private_key").encode(), self.cert)
             self.file_server.start()
-            logging.info("File transfer listener started.")
+            SD_log.info("File transfer listener started.")
         except Exception as e:
-            logging.error(f"Failed to start file listener: {e}")
+            SD_log.error(f"Failed to start file transfer listener: {e}")
+            print("Error starting file server!")
+            print("You will not be able to receive file transfers, restarting SecureDrop is recommended.")
+            print("See the logs for more details.")
     
     def process_input_requests(self):
+        """Processes requests for input from background processes"""
         while True:
             try:
                 prompt, response_queue = self.input_requests.get_nowait()
+                SD_log.info("Received request for file transfer! (details in network log)")
             except Empty:
                 break
             response = input(prompt)
             response_queue.put(response)
 
     def clean_and_exit(self, code=0):
+        """Stops background processes and closes the application"""
         self.user = {}
         print("Shutting down background processes.")
-        if self.discovery:
-            self.discovery.stop()
-            self.discovery.join(timeout=1)
-        if self.file_server:
-            self.file_server.stop()
-            self.file_server.join(timeout=1)
-        print("Exiting SecureDrop")
-        logging.info("Exiting SecureDrop.")
-        sys.exit(code)
+        try:
+            if self.discovery:
+                self.discovery.stop()
+                self.discovery.join(timeout=1)
+            if self.file_server:
+                self.file_server.stop()
+                self.file_server.join(timeout=1)
+        except Exception as e:
+            SD_log.error(f"Error stopping background processses: {e}")
+            print("An error occurred while stopping background processes!")
+            print("See the logs for more details")
+        finally:
+            print("Exiting SecureDrop")
+            SD_log.info("Exiting SecureDrop.")
+            sys.exit(code)
 
 def main():
     app = SecureDrop()

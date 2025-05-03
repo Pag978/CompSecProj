@@ -44,7 +44,7 @@ def create_and_store_bytes(n, filepath):
 # ----- Encryption -----
 def encrypt_aes(data, key):
     """
-    Returns AES-GCM encrypted `data` as bytes.\n
+    Returns AES-GCM encrypted `data` as bytes using `key`.\n
     Format: `nonce` | `ciphertext` | `tag`
     """
     cipher = AES.new(key, AES.MODE_GCM)
@@ -53,7 +53,7 @@ def encrypt_aes(data, key):
 
 def decrypt_aes(data, key):
     """
-    Returns AES-GCM decrypted `data` as bytes.\n
+    Returns AES-GCM decrypted `data` as bytes using `key`.\n
     Expects `data` in format: `nonce` | `ciphertext` | `tag`
     """
     nonce = data[:NONCE_SIZE]
@@ -70,26 +70,30 @@ def generate_rsa_key_pair():
     return private_key, public_key
 
 def encrypt_rsa(data, public_key):
-    """Returns RSA encrypted `data` as bytes using receiver's public key"""
+    """Returns RSA encrypted `data` as bytes using `public_key`"""
     rsa_key = RSA.import_key(public_key)
     cipher = PKCS1_OAEP.new(rsa_key)
     return base64.b64encode(cipher.encrypt(data))
 
 def decrypt_rsa(data, private_key):
-    """Returns RSA decrypted `data` as bytes using receiver's private key"""
+    """Returns RSA decrypted `data` as bytes using `private_key`"""
     rsa_key = RSA.import_key(private_key)
     cipher = PKCS1_OAEP.new(rsa_key)
     return cipher.decrypt(base64.b64decode(data))
 
+# ----- Signed Certificate -----
 def sign_message(data, private_key):
-    """Sign message using RSA private key"""
+    """Returns hash of `data` signed using `private_key`"""
     rsa_key = RSA.import_key(private_key)
     hash_obj = SHA256.new(data.encode())
     signature = pss.new(rsa_key).sign(hash_obj)
     return base64.b64encode(signature).decode()
 
 def verify_signature(data, signature, public_key):
-    """Verify signature using RSA public key"""
+    """
+    Verify signature using RSA public key.\n
+    Returns `True` given a valid signature, `False` otherwise.
+    """
     rsa_key = RSA.import_key(public_key)
     hash_obj = SHA256.new(data.encode())
     sig = base64.b64decode(signature)
@@ -100,8 +104,11 @@ def verify_signature(data, signature, public_key):
     except:
         return False
 
-# Create a simple self-signed certificate with a signature over (email|name|public_key)
 def create_certificate(email, full_name, public_key, private_key):
+    """
+    Creates simple self-signed certificate for authentication.\n
+    Format: `email`|`name`|`public_key`
+    """
     cert_data = {
         "email": email,
         "name": full_name,
@@ -113,6 +120,10 @@ def create_certificate(email, full_name, public_key, private_key):
     return cert_data
 
 def verify_certificate(cert):
+    """
+    Verifies certificate using public RSA key.\n
+    Returns `True` given a valid certificate, `False` otherwise.
+    """
     try:
         email = cert.get("email")
         name = cert.get("name")
@@ -125,19 +136,22 @@ def verify_certificate(cert):
 
 # ----- File I/O -----
 def secure_write(data, filepath):
-    """Write data with owner-only R/W permissions (mode 600)."""
+    """Writes `data` to `filepath` with owner-only R/W permissions (mode 600)."""
     with open(filepath, "wb") as file:
         file.write(data)
     os.chmod(filepath, stat.S_IRUSR | stat.S_IWUSR)
 
 # Called secure_read for consistency, no security here
 def secure_read(filepath):
-    """Read data from a file."""
+    """Returns data stored in `filepath`."""
     with open(filepath, "rb") as file:
         return file.read()
 
 def load_and_decrypt(filepath, key):
-    """Returns decrypted JSON object stored in `filepath`, if it exists."""
+    """
+    Returns decrypted JSON object stored in `filepath` using `key`.\n
+    If `filepath` does not exist, returns `{}`
+    """
     if os.path.exists(filepath):
         try:
             data = secure_read(filepath)

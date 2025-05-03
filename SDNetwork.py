@@ -29,11 +29,13 @@ CHUNK_HEADER_SIZE = 4       # Size of the header sent with file chunks (A single
 print_lock = threading.Lock()   # Thread lock for printing to stdout
 input_requests = Queue()        # Queue to send input requests to the main thread
 
-logging.basicConfig(
-    filename="Network.log",
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s: %(message)s"
-)
+# Logging for network activity
+SDN_log = logging.getLogger("SDNetwork")
+SDN_log.setLevel(logging.DEBUG)
+SDN_handler = logging.FileHandler("Network.log")
+SDN_formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
+SDN_handler.setFormatter(SDN_formatter)
+SDN_log.addHandler(SDN_handler)
 
 class DiscoveryService(threading.Thread):
     """
@@ -57,7 +59,7 @@ class DiscoveryService(threading.Thread):
         try:
             self.sock.bind(("", BROADCAST_PORT))
         except Exception as e:
-            logging.error(f"DiscoveryService bind error: {e}")
+            SDN_log.error(f"DiscoveryService bind error: {e}")
         self.sock.settimeout(1.0)       # Time limit on recvfrom
     
     def run(self):
@@ -93,7 +95,7 @@ class DiscoveryService(threading.Thread):
         try:
             self.sock.sendto(message.encode(), (BROADCAST_ADDRESS, BROADCAST_PORT))
         except Exception as e:
-            logging.error(f"Broadcast error: {e}")
+            SDN_log.error(f"Broadcast error: {e}")
     
     def _process_message(self, data, addr):
         """Process incoming broadcast messages"""
@@ -115,14 +117,14 @@ class DiscoveryService(threading.Thread):
                         "ip": addr[0],
                         "last_seen": time.time()
                     }
-                    logging.info(f"Discovered contact: {sender_email} from {addr[0]}")
+                    SDN_log.info(f"Discovered contact: {sender_email} from {addr[0]}")
                     contacts = SDSecurity.load_and_decrypt(self.contacts_file, self.aes_key)
                     if sender_email in contacts:
                         if self.cert.get("email") in sender_added:
                             if not contacts.get(sender_email).get("reciprocated", False):
                                 contacts[sender_email]["reciprocated"] = True
                                 SDSecurity.encrypt_and_store(contacts, self.contacts_file, self.aes_key)
-                                logging.info(f"Reciprocation established with {sender_email}")
+                                SDN_log.info(f"Reciprocation established with {sender_email}")
                         elif contacts.get(sender_email).get("reciprocated"):
                             # Update if reciprocation is lost (I feel like this constant file writing is bad)
                             contacts[sender_email]["reciprocated"] = False
@@ -130,7 +132,7 @@ class DiscoveryService(threading.Thread):
 
         except Exception as e:
             # ignore invalid/unauthenticated packets
-            logging.error(f"Error processing discovery message: {e}")
+            SDN_log.error(f"Error processing discovery message: {e}")
     
     def _cleanup_contacts(self):
         """Removes contacts that have not been heard from within OFFLINE_TIMEOUT."""
@@ -139,15 +141,15 @@ class DiscoveryService(threading.Thread):
         for email, info in list(self.online_contacts.items()):
             if cur_time - info.get("last_seen") > OFFLINE_TIMEOUT:
                 self.online_contacts.pop(email)
-                logging.info(f"{email} went offline.")
+                SDN_log.info(f"{email} went offline.")
 
     def get_online_contacts(self):
         """Return a snapshot of online contacts."""
         return self.online_contacts.copy()
     
     def stop(self):
-        """Stop the broadcast listener thread."""
-        logging.info("Stopping DiscoveryService.")
+        """Stops the DiscoveryService thread."""
+        SDN_log.info("Stopping DiscoveryService.")
         self.running = False
 
 class FileTransferService(threading.Thread):
@@ -165,10 +167,10 @@ class FileTransferService(threading.Thread):
             self._initiate_session()
             self._send_file()
         except Exception as e:
-            logging.error(f"Error in file transfer session: {e}")
+            SDN_log.error(f"Error in file transfer session: {e}")
         finally:
             if self.sock:
-                logging.info("Closing FileTransferService socket.")
+                SDN_log.info("Closing FileTransferService socket.")
                 self.sock.close()
     
     def _initiate_session(self):
@@ -186,7 +188,7 @@ class FileTransferService(threading.Thread):
             "filename": os.path.basename(self.filepath)
         }
         self.sock.send(json.dumps(request).encode())
-        logging.info(f"Sent request for file transfer to {self.peer_cert['email']} at {self.peer_ip}")
+        SDN_log.info(f"Sent request for file transfer to {self.peer_cert['email']} at {self.peer_ip}")
         response = json.loads(self.sock.recv(CHUNK_SIZE).decode())
         if response.get("type") != "FILE_TRANSFER_APPROVED":
             safe_print("File transfer request was not approved.")
@@ -199,9 +201,9 @@ class FileTransferService(threading.Thread):
             encrypted_key = SDSecurity.encrypt_rsa(self.session_key.hex().encode(), peer_pub)
             key_exchange = {"type": "SESSION_KEY", "key": encrypted_key.decode()}
             self.sock.send(json.dumps(key_exchange).encode())
-            logging.info(f"File transfer session initiated with {self.peer_ip}!")
+            SDN_log.info(f"File transfer session initiated with {self.peer_ip}!")
         except Exception as e:
-            logging.error(f"Error performing key exchange: {e}")
+            SDN_log.error(f"Error performing key exchange: {e}")
     
     def _send_file(self):
         """Sends file in 4096-byte chunks, encrypted with AES session key"""
@@ -211,7 +213,7 @@ class FileTransferService(threading.Thread):
             # Add newline delimiter so receiver knows when info header ends
             data += b"\n"
             self.sock.send(data)
-            logging.debug(f"Data sent: {data}")
+            SDN_log.debug(f"Data sent: {data}")
             with open(self.filepath, "rb") as file:
                 while chunk := file.read(CHUNK_SIZE):
                     encrypted_chunk = SDSecurity.encrypt_aes(chunk, self.session_key)
@@ -220,9 +222,9 @@ class FileTransferService(threading.Thread):
                     # Header size is 4 bytes, "!I" = unsigned int packed for network use (big-endian)
                     chunk_header = struct.pack("!I", len(encrypted_chunk))
                     self.sock.sendall(chunk_header + encrypted_chunk)
-            logging.info(f"{self.filepath} sent successfully!")
+            SDN_log.info(f"{self.filepath} sent successfully!")
         except Exception as e:
-            logging.error(f"Error sending file: {e}")
+            SDN_log.error(f"Error sending file: {e}")
 
 class FileTransferListener(threading.Thread):
     def __init__(self, private_key, cert):
@@ -241,7 +243,7 @@ class FileTransferListener(threading.Thread):
             # Listen for incoming file transfer requests
             server_sock.bind(("", EXCHANGE_PORT))
             server_sock.listen(5)
-            logging.info(f"Listening for file transfer requests on port {EXCHANGE_PORT}.")
+            SDN_log.info(f"Listening for file transfer requests on port {EXCHANGE_PORT}.")
             while self.running:
                 try:
                     client_sock, addr = server_sock.accept()
@@ -251,9 +253,9 @@ class FileTransferListener(threading.Thread):
                     # Create handler thread for each incoming connection
                     threading.Thread(target=self.handle_transfer, args=(client_sock, addr)).start()
                 except Exception as e:
-                    logging.error(f"Error accepting file transfer connection: {e}")
+                    SDN_log.error(f"Error accepting file transfer connection: {e}")
         except Exception as e:
-            logging.error(f"Error initiating FileTransferListener: {e}")
+            SDN_log.error(f"Error initiating FileTransferListener: {e}")
         finally:
             server_sock.close()
 
@@ -263,7 +265,7 @@ class FileTransferListener(threading.Thread):
             # Receive request for transfer & prompt user for response
             request = json.loads(sock.recv(CHUNK_SIZE).decode())
             if request.get("type") != "FILE_TRANSFER_REQUEST":
-                logging.error("Invalid file transfer request received.")
+                SDN_log.error("Invalid file transfer request received.")
                 sock.close()
                 return
             email = request.get("certificate").get("email")
@@ -271,11 +273,11 @@ class FileTransferListener(threading.Thread):
             choice = request_input(f"{email} is requesting to transfer {filename}. Accept? (y/n): ").strip().lower()
             if choice != "y":
                 sock.send(json.dumps({"type": "FILE_TRANSFER_DENIED"}).encode())
-                logging.info(f"Denied file transfer request from {email}.")
+                SDN_log.info(f"Denied file transfer request from {email}.")
                 sock.close()
                 return
             sock.send(json.dumps({"type": "FILE_TRANSFER_APPROVED"}).encode())
-            logging.info(f"Approved file transfer request from {email}.")
+            SDN_log.info(f"Approved file transfer request from {email}.")
 
             # Perform AES key exchange
             key_exchange = json.loads(sock.recv(CHUNK_SIZE).decode())
@@ -284,7 +286,7 @@ class FileTransferListener(threading.Thread):
             encrypted_key = key_exchange.get("key")
             decrypted_hex = SDSecurity.decrypt_rsa(encrypted_key, self.private_key.decode())
             session_key = bytes.fromhex(decrypted_hex.decode())
-            logging.info("AES session key received!")
+            SDN_log.info("AES session key received!")
 
             # Receive info header by checking for newline
             info = json.loads(recv_info_header(sock).decode())
@@ -307,15 +309,16 @@ class FileTransferListener(threading.Thread):
                     if chunk:
                         file.write(chunk)
                         received += len(chunk)
-            logging.info(f"{filename} received and saved to {outfile}!")
+            SDN_log.info(f"{filename} received and saved to {outfile}!")
             safe_print(f"{filename} received and saved to '{outfile}'!")
         except Exception as e:
-            logging.error(f"Error receiving file: {e}")
+            SDN_log.error(f"Error receiving file: {e}")
         finally:
             sock.close()
     
     def stop(self):
-        logging.info("Stopping FileTransferListener.")
+        """Stops the FileTransferListener thread."""
+        SDN_log.info("Stopping FileTransferListener.")
         self.running = False
 
 # Can't use exact number like chunk header since filesize can vary
@@ -348,12 +351,14 @@ def recv_n_bytes(sock, n):
     return buffer
 
 def request_input(prompt):
+    """Sends requets for input to main thread"""
     response = Queue(1)
     input_requests.put((prompt, response))
     return response.get()
 
 # Thread safe printing so that it doesn't interfere as much with the cmd shell
 def safe_print(*args, **kwargs):
+    """Thread safe printing to stdout"""
     with print_lock:
         print(*args, **kwargs)
         sys.stdout.flush()
